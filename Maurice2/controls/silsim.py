@@ -6,6 +6,7 @@ if PROJECT_ROOT not in sys.path:
 import datetime
 import numpy as np
 import csv
+import matplotlib.pyplot as plt
 
 from rocketpy import Environment, SolidMotor, Rocket, Flight
 from rocketpy.control.controller import _Controller
@@ -189,29 +190,29 @@ class SilSim:
         """
         maurice2 = Rocket(
             radius=7.87/200,
-            mass=2.259,
+            mass=2.328,
             inertia=(0.28, 0.002940, 0.002940),
-            power_off_drag=0.560,
-            power_on_drag=0.580,
-            center_of_mass_without_motor=0.669,
-            coordinate_system_orientation="tail_to_nose",
+            power_off_drag="Maurice2/data/drag_no_thrust.csv",
+            power_on_drag="Maurice2/data/drag_with_thrust.csv",
+            center_of_mass_without_motor=0.573, # Corrected CoM 
+            coordinate_system_orientation="tail_to_nose", # Nose to tail mimicks OpenRocket
         )
         # Remeasure
         ourMotor = SolidMotor(
             thrust_source="Maurice2/data/AeroTech_HP-I280DM.eng",  # Or use a CSV thrust file
             dry_mass=(0.616 - 0.355),  # kg
             burn_time=self.controller.t_motor_burnout,  # Corrected burn time
-
             dry_inertia=(0.004, 0.004, 0.287),  # kg·m² (approximated)
+            # Fixed Geometries to make propellant mass = 0.355 kg
             nozzle_radius= (10 / 1000), 
             grain_number=5,
-            grain_density=18, 
-            grain_outer_radius= 7 / 1000,  
-            grain_initial_inner_radius=4 / 1000,  
-            grain_initial_height= 360 / 5000,  
+            grain_density=1800, # Fixed grain density 18 --> 1800 kg·m^3
+            grain_outer_radius= 16 / 1000,  
+            grain_initial_inner_radius= 6 / 1000,  
+            grain_initial_height= 57 / 1000,  
             grain_separation=0.01,  
-            grains_center_of_mass_position=-0.07,  # Estimated
-            center_of_dry_mass_position=0.05,  # Estimated
+            grains_center_of_mass_position=-0.1044,  # Estimated
+            center_of_dry_mass_position=-0.122,  # Estimated
             nozzle_position=-0.3,
             throat_radius= 3.5 / 1000,  
             coordinate_system_orientation="nozzle_to_combustion_chamber",
@@ -220,7 +221,7 @@ class SilSim:
         maurice2.add_motor(ourMotor, position=0.01*(117-86.6))
 
         nose_cone = maurice2.add_nose(
-            length=0.19, kind="lvhaack", position=0.01*(117-0.19)
+            length=0.19, kind="lvhaack", position=0.01*(116.81) # Corrected position
         )
 
         # Boat Tail
@@ -251,7 +252,6 @@ class SilSim:
         maurice2.add_surfaces(ourNewFins, 0.01*(117-92.7))
         # Commented out to first verify the rocket flies correctly compared to the OpenRocket
         # maurice2._add_controllers(rpy_controller)
-
         return maurice2, rpy_controller
     
 
@@ -276,6 +276,9 @@ class SilSim:
 
         rocket, controller = self.makeOurRocket(self.sampling_rate)
 
+        # Plot on image of the rocket to verify correct Setup
+        rocket.draw() 
+        plt.show()
         # Flight parameters
         flight = Flight(
             rocket=rocket, environment=env, rail_length=5.2, inclination=85, heading=0
