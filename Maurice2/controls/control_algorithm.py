@@ -192,7 +192,7 @@ class Controls:
 
         constants = dict()
         ## Post burnout constants ##
-        I = Matrix([0.004, 0.004, 0.287]) # Post burnout inertia values from OpenRocket, kg*m^2
+        I = Matrix([0.287, 0.287, 0.0035]) # Post burnout inertia values from OpenRocket, kg*m^2
         m = 2.589  # Post burnout mass from OpenRocket, kg
         CG = 63.5/100  # Post burnout CG from OpenRocket, m
         T = Matrix([0., 0., 0.])  # N
@@ -205,8 +205,10 @@ class Controls:
             m = sum(coeffs_mass[i] * t**(degree_mass - i) for i in range(degree_mass + 1))
 
             coeffs_inertia, degree_inertia = self.getLineOfBestFitTime("inertia")
-            I[2] = sum(coeffs_inertia[i] * t**(degree_inertia - i) for i in range(degree_inertia + 1))
-            
+            I_long = sum(coeffs_inertia[i] * t**(degree_inertia - i) for i in range(degree_inertia + 1))
+            I[0] = I_long # Ixx
+            I[1] = I_long # Iyy
+
             coeffs_CG, degree_CG = self.getLineOfBestFitTime("CG")
             CG = sum(coeffs_CG[i] * t**(degree_CG - i) for i in range(degree_CG + 1))
 
