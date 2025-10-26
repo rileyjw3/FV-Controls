@@ -1,7 +1,7 @@
 from sympy import *
 import numpy as np
 import pandas as pd
-import os
+from pathlib import Path
 
 class Controls:
     def __init__(
@@ -33,7 +33,9 @@ class Controls:
         self.t_launch_rail_clearance = t_launch_rail_clearance # seconds
         self.prop_mass = prop_mass # kg
         self.L_ne = L_ne # m
-        self.csv_path = "Maurice2/data/openrocket_data.csv"
+        self.csv_path = self.csv_path = (
+            Path(__file__).resolve().parents[1] / "data" / "openrocket_data.csv"
+        )
         # self.csv_path = "/Users/dsong/Library/CloudStorage/OneDrive-UniversityofIllinois-Urbana/Club Stuff/LRI/FV-Controls/Control/openrocket_data.csv"
         self.A : Matrix = None
         self.B : Matrix = None
@@ -957,6 +959,7 @@ class Controls:
             # Gain scheduling based on vertical velocity
             K = self.control_law(xhat, t)
             u = np.clip(-K @ (xhat - self.x0) + self.u0, np.deg2rad(-8), np.deg2rad(8))
+            # u = np.array([0.0])  # For testing, set aileron to 0
             self.states.append(xhat)
             self.inputs.append(u)
             t = t + self.dt
