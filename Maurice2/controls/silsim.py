@@ -2,6 +2,7 @@ import os, sys
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
+from pathlib import Path
 
 import datetime
 import numpy as np
@@ -26,6 +27,7 @@ class SilSim:
         self.inputs = []
         self.csv_output_path = "Maurice2/data/testing.csv"
         self.csv_col_title = "input"
+        self.DATA_DIR = Path(__file__).resolve().parents[1] / "data"   # => Maurice2/data
 
 
     def set_controller(
@@ -172,8 +174,7 @@ class SilSim:
         self.inputs.append(np.rad2deg(u[0]))
         self.xhats.append(xhat.tolist())
 
-        print("At time " + str(time) + " s, the aileron angle is " + str(np.rad2deg(u)) + " degrees.")
-        print("The state estimate is " + str(xhat))
+        print("Time: " + str(time) + " s, v3: " + str(xhat[5].round(3)) + " m/s, w3: " + str(xhat[2].round(3)) + " rad/s, u: " + str(np.rad2deg(u).round(3)) + " degrees.")
 
         return u
 
@@ -187,72 +188,81 @@ class SilSim:
         Returns:
             tuple: A tuple containing the configured Rocket object and its controller.
         """
+
+        ## Define rocket ##
+        POWER_OFF_FILE = self.DATA_DIR / "drag_no_thrust.csv"
+        POWER_ON_FILE = self.DATA_DIR / "drag_with_thrust.csv"
         maurice2 = Rocket(
-            radius=7.87/200,
-            mass=2.259,
-            inertia=(0.28, 0.002940, 0.002940),
-            power_off_drag=0.560,
-            power_on_drag=0.580,
-            center_of_mass_without_motor=0.669,
-            coordinate_system_orientation="tail_to_nose",
+            radius=7.87/2/100,
+            mass=2328/1000,
+            inertia=(0.287, 0.287, 0.0035),
+            # power_off_drag=0.6175,
+            # power_on_drag=0.633,
+            power_off_drag=str(POWER_OFF_FILE),
+            power_on_drag=str(POWER_ON_FILE),
+            center_of_mass_without_motor=59.7/100,
+            coordinate_system_orientation="nose_to_tail",
         )
-        # Remeasure
-        ourMotor = SolidMotor(
-            thrust_source="Maurice2/data/AeroTech_HP-I280DM.eng",  # Or use a CSV thrust file
+        
+        ## Define solid motor ##
+        THRUST_FILE = self.DATA_DIR / "AeroTech_HP-I280DM.eng"
+        motor = SolidMotor(
+            thrust_source=str(THRUST_FILE),  # Or use a CSV thrust file
             dry_mass=(0.616 - 0.355),  # kg
             burn_time=self.controller.t_motor_burnout,  # Corrected burn time
-
-            dry_inertia=(0.004, 0.004, 0.287),  # kg·m² (approximated)
+            dry_inertia=(0.00055, 0.00055, 0.00011),  # kg·m² (approximated)
+            # Fixed Geometries to make propellant mass = 0.355 kg
             nozzle_radius= (10 / 1000), 
             grain_number=5,
-            grain_density=18, 
-            grain_outer_radius= 7 / 1000,  
-            grain_initial_inner_radius=4 / 1000,  
-            grain_initial_height= 360 / 5000,  
+            grain_density=1800, # Fixed grain density 18 --> 1800 kg·m^3
+            grain_outer_radius= 16 / 1000,  
+            grain_initial_inner_radius= 6 / 1000,  
+            grain_initial_height= 57 / 1000,  
             grain_separation=0.01,  
-            grains_center_of_mass_position=-0.07,  # Estimated
-            center_of_dry_mass_position=0.05,  # Estimated
+            grains_center_of_mass_position=-0.1044,  # Estimated
+            center_of_dry_mass_position=-0.122,  # Estimated
             nozzle_position=-0.3,
             throat_radius= 3.5 / 1000,  
             coordinate_system_orientation="nozzle_to_combustion_chamber",
         )
 
-        maurice2.add_motor(ourMotor, position=0.01*(117-86.6))
+        maurice2.add_motor(motor, position=88.2/100)
+
 
         nose_cone = maurice2.add_nose(
-            length=0.19, kind="lvhaack", position=0.01*(117-0.19)
+            length=19/100, kind="Von Karman", position=0
         )
 
-        # Boat Tail
-        # Verify that it is von karman
+        # Boat tail
         tail = maurice2.add_tail(
-            top_radius=0.0787/2, bottom_radius=0.0572/2, length=0.0381, position=.0381
+            top_radius=7.87/2/100, bottom_radius=5.72/2/100, length=3.81/100, position=(117-3.81)/100
         )
 
         # Created in fin.py, inherited from RocketPy TrapezoidalFins class
-        ourNewFins = Fins(
+        fins = Fins(
             n=4,
-            root_chord=0.203,
-            tip_chord=0.0762,
-            span=0.0737,
-            rocket_radius = 7.87/200,
+            root_chord=18/100,
+            tip_chord=5.97/100,
+            span=8.76/100,
+            rocket_radius=7.87/2/100,
             cant_angle=0.01,
-            sweep_angle=62.8
+            sweep_length=14.3/100,
         )
 
+        maurice2.add_surfaces(fins, (92.3)/100)
+
         # Integrate controller with RocketPy
-        rpy_controller = _Controller(
-            interactive_objects= [ourNewFins],
+        rp_controller = _Controller(
+            interactive_objects= [fins],
             controller_function= self.controller_function, # Pass our function into rocketpy
             sampling_rate= samplingRate, # How often it runs
             name="MAURICE 2",
         )
 
-        maurice2.add_surfaces(ourNewFins, 0.01*(117-92.7))
         # Commented out to first verify the rocket flies correctly compared to the OpenRocket
-        # maurice2._add_controllers(rpy_controller)
+        maurice2._add_controllers(rp_controller)
 
-        return maurice2, rpy_controller
+        return maurice2, rp_controller
 
 
     def run(self, sampling_rate: float):
@@ -285,8 +295,9 @@ class SilSim:
         flight.plots.attitude_data()
         flight.plots.trajectory_3d()
 
+        export_loc = str(self.DATA_DIR / "rocketpy_output.csv")
         flight.export_data(
-            "Maurice2/data/rocketpy_output.csv",
+            export_loc,
             "w1",
             "w2",
             "w3",
@@ -296,11 +307,18 @@ class SilSim:
             "vx",
             "vy",
             "vz",
+            "x",
+            "y",
+            "z",
+            "e0",
+            "e1",
+            "e2",
+            "e3",
         )
         return flight, controller
 
 
-    def export_data(self, overwrite: bool = True):
+    def export_states(self, overwrite: bool = True):
         """
         Save logs to CSV with columns:
         time, xhat_0..xhat_{n-1}, input_0..input_{m-1}
@@ -311,7 +329,7 @@ class SilSim:
         """
 
         # Export to this location
-        path = "Maurice2/data/estimated_output.csv"
+        path = str(self.DATA_DIR / "silsim_output.csv")
 
         # Normalize to lists
         times   = list(self.times or [])
@@ -370,13 +388,17 @@ class SilSim:
 # Run SIL simulation, export flight data to CSV
 def main():
     ## Define gain matrix ##
-    Kmax_preburnout = 100 / 7e1
-    Kmin_preburnout = 17.5 / 7e1
+    K_pre_max = 1.75/7.5e0
+    K_pre_min = 2.5e-1/7.5e0
 
-    K_max_postburnout = 85 / 6e1
-    K_min_postburnout = 17.5 / 6e1
+    K_post_max = 1.0/7.5e0
+    K_post_min = 2.5e-1/7.5e0
 
-    Ks = np.array([Kmax_preburnout, Kmin_preburnout, K_max_postburnout, K_min_postburnout])  # Gain scheduling based on altitude
+    pre_width = 5
+    post_width = 8
+
+    pre_v3_mid = 90.0
+    post_v3_mid = 90.0
 
     ## Define initial conditions ##
     xhat0 = np.array([0, 0, 0, 0, 0, 0, 1, 0, 0, 0]) # Initial state estimate
@@ -384,14 +406,20 @@ def main():
     sampling_rate = 20.0  # Hz
     dt = 1.0 / sampling_rate
 
-    controller = Controls(Ks=Ks, dt=dt, x0=xhat0, u0=u0, t_launch_rail_clearance=0.308)
-    controller.deriveEOM(post_burnout=False)
-    controller.deriveEOM(post_burnout=True)
-    controller.buildL(lw=5.0, lqw=1.0, lqx=2.0, lqy=2.0, lqz=2.0)
-    # controller.buildL(lw=0.0, lqw=0.0, lqx=0.0, lqy=0.0, lqz=0.0)
+    controller = Controls(dt=dt, x0=xhat0, u0=u0, t_launch_rail_clearance=0.308)
+    controller.setup_EOM()
+    controller.set_K_params(K_pre_max=K_pre_max, K_pre_min=K_pre_min,
+                            K_post_max=K_post_max, K_post_min=K_post_min,
+                            pre_width=pre_width, post_width=post_width,
+                            pre_v3_mid=pre_v3_mid, post_v3_mid=post_v3_mid)
+    # controller.buildL(lw=100.0, lqw=4.0, lqx=8.0, lqy=8.0, lqz=8.0)
+    controller.buildL(lw=75.0, lqw=30.0, lqx=60.0, lqy=60.0, lqz=60.0)
+
+    ## Run SIL simulation ##
     sim = SilSim(sampling_rate=sampling_rate, controller=controller)
     flight, controller = sim.run(sampling_rate=sampling_rate)
-    sim.export_data()
+    sim.export_states()
 
 if __name__ == "__main__":
     main()
+    print("SIL simulation complete.")
