@@ -462,8 +462,6 @@ class Controls:
         ## Total Forces ##
         F = T + Fd + Fl + Fg # Total force vector
 
-        # F = Fd + Fl # For debugging, add thrust and gravity in loop to avoid differentiating them to 0 in A
-
         ## Cnalpha ##
         Cnalpha = 0.207  # Linear assumption of Cn vs AoA slope from OpenRocket data (fitted to quadratic, minimal x^2 coefficient)
 
@@ -478,7 +476,6 @@ class Controls:
         ## Rocket diameter ##
         d = Float(7.87)/100 # m
 
-        ## FIXME: CCM HAS UNITS N*m, SHOULD USE DAMPING MOMENT COEFFICIENT (Cmq) INSTEAD ##
         ## Corrective moment coefficient ##
         # Multiplying by stability because CG is where rotation is about and CP is where force is applied
             # SM = (CP - CG) / d
@@ -496,7 +493,7 @@ class Controls:
         Cdm = Cdp + Cda
 
         ## Moment due to aileron deflection ##
-        M_fin = 200 * (Float(1)/2 * rho * v_mag**2) * Matrix([0, 0, 1e-8])  # Fin misalignment, total moment from all four fins, tune later
+        M_fin = 0 * 200 * (Float(1)/2 * rho * v_mag**2) * Matrix([0, 0, 1e-8])  # Fin misalignment, total moment from all four fins, tune later
         M_delta = self.getAileronMoment(delta1, v3)
         M1 = M_fin[0] + M_delta[0] + Ccm[0] - Cdm * w1
         M2 = M_fin[1] + M_delta[1] + Ccm[1] - Cdm * w2
@@ -544,6 +541,13 @@ class Controls:
         else:
             self.f_postburnout = f
     
+
+    def setup_EOM(self):
+        """Setup the equations of motion by deriving pre- and post-burnout EOMs.
+        """
+        self.deriveEOM(post_burnout=False)
+        self.deriveEOM(post_burnout=True)
+
 
     def computeAB(self, t: float, xhat: np.array, u: np.array):
         """Compute the A and B matrices at time t.
