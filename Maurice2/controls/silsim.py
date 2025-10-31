@@ -24,6 +24,7 @@ class SilSim:
         self.controller = controller
         self.times = []
         self.xhats = []
+        self.states = []
         self.inputs = []
         self.csv_output_path = "Maurice2/data/testing.csv"
         self.csv_col_title = "input"
@@ -161,21 +162,21 @@ class SilSim:
         ## Get K and L matrices ##
         K, L = self.controller.control_law(xhat=xhat, t=time), self.controller.L
 
-        # accel_T = self.controller.get_thrust_accel(t=time)
-        # accel_g = self.controller.get_gravity_accel(xhat=xhat)
-        # xhatdot = A @ xhat + B @ u_prev + accel_T + accel_g \
-        #         - L @ (C @ xhat - y)
-        # xhat = xhat + xhatdot * self.controller.dt
-        # xhat[6:10] /= np.linalg.norm(xhat[6:10])
-        # u = np.clip(-K @ (xhat - self.controller.x0) + self.controller.u0, np.deg2rad(-8), np.deg2rad(8))
-        # u = np.array([0.0]) # Disable control for testing
-
-        f_subs = np.array(self.controller.f_subs, dtype=float).reshape(-1)
-        xhatdot = f_subs - L @ (C @ xhat - y)
+        accel_T = self.controller.get_thrust_accel(t=time)
+        accel_g = self.controller.get_gravity_accel(xhat=xhat)
+        xhatdot = A @ xhat + B @ u_prev + accel_T + accel_g \
+                - L @ (C @ xhat - y)
         xhat = xhat + xhatdot * self.controller.dt
         xhat[6:10] /= np.linalg.norm(xhat[6:10])
-        K = self.controller.control_law(xhat, time)
         u = np.clip(-K @ (xhat - self.controller.x0) + self.controller.u0, np.deg2rad(-8), np.deg2rad(8))
+        # u = np.array([0.0]) # Disable control for testing
+
+        # f_subs = np.array(self.controller.f_subs, dtype=float).reshape(-1)
+        # xhatdot = f_subs - L @ (C @ xhat - y)
+        # xhat = xhat + xhatdot * self.controller.dt
+        # xhat[6:10] /= np.linalg.norm(xhat[6:10])
+        # K = self.controller.control_law(xhat, time)
+        # u = np.clip(-K @ (xhat - self.controller.x0) + self.controller.u0, np.deg2rad(-8), np.deg2rad(8))
 
         # xhat = self.controller._rk4_step(time, xhat, u_prev) - L @ (C @ xhat - y)
         # qn = np.linalg.norm(xhat[6:10])
@@ -187,6 +188,7 @@ class SilSim:
         self.times.append(time)
         self.inputs.append(np.rad2deg(u[0]))
         self.xhats.append(xhat.tolist())
+        self.states.append(state)
 
         print("Time: " + str(time) + " s, v3: " + str(xhat[5].round(3)) + " m/s, w3: " + str(xhat[2].round(3)) + " rad/s, u: " + str(np.rad2deg(u).round(3)) + " degrees.")
 
@@ -335,9 +337,9 @@ class SilSim:
     def export_states(self, overwrite: bool = True):
         """
         Save logs to CSV with columns:
-        time, xhat_0..xhat_{n-1}, input_0..input_{m-1}
+        time, state_0..state_{p-1}, xhat_0..xhat_{n-1}, input_0..input_{m-1}
 
-        - Uses the min length across times/xhats/inputs.
+        - Uses the min length across times/xhats/states/inputs.
         - Flattens numpy arrays and lists.
         - Overwrites by default; set overwrite=False to append (adds header only if file doesn't exist).
         """
@@ -348,13 +350,14 @@ class SilSim:
         # Normalize to lists
         times   = list(self.times or [])
         xhats   = list(self.xhats or [])
+        states  = list(getattr(self, "states", []) or [])
         inputs  = list(self.inputs or [])
 
-        n = min(len(times), len(xhats), len(inputs))
+        n = min(len(times), len(xhats), len(states), len(inputs))
         if n == 0:
-            raise ValueError("No log data to write (times/xhats/inputs are empty).")
+            raise ValueError("No log data to write (times/xhats/states/inputs are empty or mismatched).")
 
-        # Peek sizes
+        # Helper to get flattened length
         def _flat_len(x):
             if x is None:
                 return 0
@@ -362,11 +365,16 @@ class SilSim:
                 return int(np.asarray(x).size)
             return 1
 
+        # Peek sizes (assume consistent sizes within each list)
+        state_len = _flat_len(states[0])
         xhat_len  = _flat_len(xhats[0])
         input_len = _flat_len(inputs[0])
 
-        # Build header
-        header = ["time"] + [f"xhat_{i}" for i in range(xhat_len)] + [f"input_{j}" for j in range(input_len)]
+        # Build header (swap the two blocks if you prefer xhat_* before state_*)
+        header = (["time"]
+                + [f"state_{i}" for i in range(state_len)]
+                + [f"xhat_{i}" for i in range(xhat_len)]
+                + [f"input_{j}" for j in range(input_len)])
 
         mode = "w" if overwrite else "a"
         write_header = True
@@ -383,20 +391,23 @@ class SilSim:
                 w.writerow(header)
 
             for i in range(n):
-                t = float(times[i])
-
+                t  = float(times[i])
                 xi = xhats[i]
+                si = states[i]
                 ui = inputs[i]
 
-                # flatten to lists with correct lengths
-                xi_flat = [] if xhat_len == 0 else np.asarray(xi).reshape(-1).tolist()
+                # Flatten to lists with correct lengths
+                si_flat = [] if state_len == 0 else np.asarray(si).reshape(-1).tolist()
+                xi_flat = [] if xhat_len  == 0 else np.asarray(xi).reshape(-1).tolist()
                 ui_flat = [] if input_len == 0 else np.asarray(ui).reshape(-1).tolist()
 
-                # pad/truncate to header lengths (safety)
+                # Pad/truncate to header lengths (safety)
+                si_flat = (si_flat + [None]*state_len)[:state_len]
                 xi_flat = (xi_flat + [None]*xhat_len)[:xhat_len]
                 ui_flat = (ui_flat + [None]*input_len)[:input_len]
 
-                w.writerow([t] + xi_flat + ui_flat)
+                # Write row (swap si_flat and xi_flat here too if re-ordering)
+                w.writerow([t] + si_flat + xi_flat + ui_flat)
 
         
 # Run SIL simulation, export flight data to CSV
@@ -426,9 +437,9 @@ def main():
                             K_post_max=K_post_max, K_post_min=K_post_min,
                             pre_width=pre_width, post_width=post_width,
                             pre_v3_mid=pre_v3_mid, post_v3_mid=post_v3_mid)
-    # controller.buildL(lw=100.0, lqw=4.0, lqx=8.0, lqy=8.0, lqz=8.0)
+    controller.buildL(lw=10.0, lqw=0.25, lqx=0.5, lqy=0.5, lqz=0.5)
     # controller.buildL(lw=40 , lqw=0.01, lqx=0.5, lqy=0.5, lqz=0.5)
-    controller.buildL(lw=0.0, lqw=0.0, lqx=0.0, lqy=0.0, lqz=0.0)
+    # controller.buildL(lw=0.0, lqw=0.0, lqx=0.0, lqy=0.0, lqz=0.0)
 
     ## Run SIL simulation ##
     sim = SilSim(sampling_rate=sampling_rate, controller=controller)
