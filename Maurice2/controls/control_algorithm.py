@@ -56,8 +56,6 @@ class Controls:
         self.x0 = np.array(x0, dtype=float) if x0 is not None else None
         self.u0 = np.array(u0, dtype=float) if u0 is not None else None
         self.t_sym : Symbol = None
-        self.T = None
-        self.g = None
 
         # Logging
         self.states = [self.x0]
@@ -370,7 +368,7 @@ class Controls:
         # Verify later with data points
         M3 = deg(delta1)/8 * (-2.21e-09*(v3**3) 
                         + 1.58e-06*(v3**2) 
-                        + 4.18e-06*v3 
+                        + 4.18e-06*v3
                         ) # v3 = vertical velocity, Mz = roll moment
 
         return Matrix([M1, M2, M3])
@@ -414,12 +412,15 @@ class Controls:
         v3 = symbols('v_3', real = True, positive = True) # Longitudinal velocity, assumed positive during flight
         qw, qx, qy, qz = symbols('q_w q_x q_y q_z', real = True) # Quaternion components
         I1, I2, I3 = symbols('I_1 I_2 I_3', real = True) # Moments of inertia
-        M1, M2, M3 = symbols('M_1 M_2 M_3', real = True) # Moments
         T1, T2, T3 = symbols('T_1 T_2 T_3', real = True) # Thrusts
-        mass, rho, A, g, CG = symbols('m rho A g CG', real = True) # Mass, air density, reference area, gravity, center of gravity
-        delta1 = symbols('delta_1', real = True) # Aileron angle
-
+        mass, rho, d, g, CG = symbols('m rho d g CG', real = True) # Mass, air density, diameter, gravity, center of gravity
+        delta1 = symbols('delta1', real = True) # Aileron angle
+        Cnalpha_fin = symbols('Cnalpha_fin', real = True, positive = True) # Fin normal force coefficient derivative
+        Cr, Ct, s = symbols('Cr Ct s', real = True, positive = True) # Fin root chord, tip chord, span
+        N = symbols('N', real = True, positive = True) # Number of fins
+        kappa = symbols('kappa', real = True) # Fin cant angle
         t_sym = symbols('t', real = True) # Time symbol for Heaviside function
+        
         self.t_sym = t_sym
         H = Heaviside(t_sym - Float(self.t_launch_rail_clearance), 0)  # 0 if t < t_launch_rail_clearance, 1 if t >= t_launch_rail_clearance
 
@@ -435,11 +436,14 @@ class Controls:
         v_mag = sqrt(v1**2 + v2**2 + v3**2 + eps**2) # Magnitude of velocity with small term to avoid division by zero
         vhat = v / v_mag  # Unit vector in direction of velocity
 
+        ## Rocket reference area ##
+        A = pi * (d/2)**2 # m^2
+
         ## Thrust ##
         T : Matrix = Matrix([T1, T2, T3])  # Thrust vector, T1 and T2 are assumed 0
 
         ## Gravity ##
-        Fg_world = Matrix([0.0, 0.0, -mass * g])
+        Fg_world = Matrix([0.0, 0.0, mass * g])
         R_world_to_body = self.R_BW_from_q(qw, qx, qy, qz)  # Rotation matrix from world to body frame
         Fg : Matrix = R_world_to_body * Fg_world  # Transform gravitational force to body frame
 
@@ -460,12 +464,14 @@ class Controls:
         Fl : Matrix = L * nL # Lift force vector
 
         ## Total Forces ##
-        F = T + Fd + Fl + Fg # Total force vector
+        F = T + Fd + Fl + Fg # Thrust + Drag + Lift + Gravity
 
         ## Cnalpha ##
+        # TODO: Show how this is calculated from OpenRocket data
         Cnalpha = 0.207  # Linear assumption of Cn vs AoA slope from OpenRocket data (fitted to quadratic, minimal x^2 coefficient)
 
         ## Stability Margin ##
+        # TODO: Potential to implement our own polynomial fitting function instead of using hardcoded coefficients from Google Sheets
         AoA_deg = AoA_eff * 180 / pi # Convert AoA to degrees for polynomial fit
         SM = 0
         if not post_burnout:
@@ -473,31 +479,54 @@ class Controls:
         else:
             SM = -0.086*AoA_deg + 2.73
 
-        ## Rocket diameter ##
-        d = Float(7.87)/100 # m
-
         ## Corrective moment coefficient ##
         # Multiplying by stability because CG is where rotation is about and CP is where force is applied
             # SM = (CP - CG) / d
+        # TODO: Show how this is calculated (Apogee Rocketry report reference)
         C_raw = H * v_mag**2 * A * Cnalpha * AoA_eff * (SM * d) * rho / 2 # See if it's Cnalpha or Cn, Cn = Cnalpha * AoA_eff
         Ccm = Matrix([C_raw * sin(beta), -C_raw * cos(beta), 0])  # Corrective moment vector
 
         ## Propulsive Damping Moment Coefficient (Cdp) ##
+        # TODO: Show how this is calculated (Apogee Rocketry report reference)
         mdot = self.prop_mass / self.t_motor_burnout # kg/s, average mass flow rate during motor burn
         Cdp = mdot * (self.L_ne - CG)**2 # kg*m^2/s
 
         ## Aerodynamic Damping Moment Coefficient (Cda) ##
+        # TODO: Show how this is calculated (Apogee Rocketry report reference)
         Cda = H * (rho * v_mag * A / 2) * (Cnalpha * AoA_eff * (SM * d)**2)
 
         ## Damping Moment Coefficient (Cdm) ##
         Cdm = Cdp + Cda
 
         ## Moment due to aileron deflection ##
-        M_fin = 5.5 * (Float(1)/2 * rho * v_mag**2) * Matrix([0, 0, 1e-8])  # Fin misalignment, total moment from all four fins, tune later
+        # Fin misalignment moment, remove for 0 roll (ideal rocket flight)
+        # M_fin = 5.5 * (Float(1)/2 * rho * v_mag**2) * Matrix([0, 0, 1e-6])
+
+        gamma = Ct/Cr
+        r_t = d/2
+        tau = (s + r_t) / r_t
+        Y_MA = (s/3) * (1 + 2*gamma)/(1+gamma) # Spanwise location of fin aerodynamic center
+        Kf = (1/pi**2) * \
+            ((pi**2/4)*((tau+1)**2/tau**2) \
+            + (pi*(tau**2+1)**2/(tau**2*(tau-1)**2))*asin((tau**2-1)/(tau**2+1)) \
+            - (2*pi*(tau+1))/(tau*(tau-1)) \
+            + ((tau**2+1)**2/(tau**2*(tau-1)**2))*asin((tau**2-1)/(tau**2+1))**2 \
+            - (4*(tau+1)/(tau*(tau-1)))*asin((tau**2-1)/(tau**2+1)) \
+            + (8/(tau-1)**2)*log((tau**2+1)/(2*tau)))
+        M_f = Kf * (1/2 * rho * v_mag**2) * (N * (Y_MA + r_t) * Cnalpha_fin * kappa * A) # Forcing roll moment due to fin cant angle kappa
+
+        trap_integral = s/12 * ((Cr + 3*Ct)*s**2 + 4*(Cr+2*Ct)*s*r_t + 6*(Cr + Ct)*r_t**2)
+        C_ldw = 2 * N * Cnalpha_fin / (A * d**2) * cos(kappa) * trap_integral
+        K_d = 1 + ((tau-gamma)/tau - (1-gamma)/(tau-1)*ln(tau))/((tau+1)*(tau-gamma)/2 - (1-gamma)*(tau**3-1)/(3*(tau-1))) # Correction factor for conical fins
+        M_d = K_d * (1/2 * rho * v_mag**2) * A * d * C_ldw * (w3 * d / (2 * v_mag)) # Damping roll moment
+
+        M_fin = Matrix([0, 0, M_f - M_d])
+
         M_delta = self.getAileronMoment(delta1, v3)
-        M1 = M_fin[0] + M_delta[0] + Ccm[0] - Cdm * w1
-        M2 = M_fin[1] + M_delta[1] + Ccm[1] - Cdm * w2
-        M3 = M_fin[2] + M_delta[2] + Ccm[2]
+        
+        M1 = M_fin[0] + Ccm[0] - Cdm * w1
+        M2 = M_fin[1] + Ccm[1] - Cdm * w2
+        M3 = M_fin[2] + Ccm[0] + M_delta[2]
 
         ## Quaternion kinematics ##
         S = Matrix([[0, -w3, w2],
@@ -533,8 +562,10 @@ class Controls:
             [qdot[3]]
         ])
 
-        vars = [w1, w2, w3, v1, v2, v3, qw, qx, qy, qz, delta1, I1, I2, I3, T1, T2, T3, mass, rho, A, g, CG]
+        vars = [w1, w2, w3, v1, v2, v3, qw, qx, qy, qz, delta1]
         self.vars = vars
+        params = [I1, I2, I3, T1, T2, T3, mass, rho, d, g, CG, kappa, Cnalpha_fin, Cr, Ct, s, N]
+        self.params = params
 
         if (not post_burnout):
             self.f_preburnout = f
@@ -566,9 +597,9 @@ class Controls:
         if self.f_preburnout is None or self.f_postburnout is None or self.vars is None:
             print("Equations of motion have not been derived yet. Call deriveEOM() first on pre- and post-burnout.")
             return None, None, None, None
-        
-        w1, w2, w3, v1, v2, v3, qw, qx, qy, qz, delta1, I1, I2, I3, T1, T2, T3, mass, rho, A, g, CG = self.vars
 
+        w1, w2, w3, v1, v2, v3, qw, qx, qy, qz, delta1 = self.vars
+        I1, I2, I3, T1, T2, T3, mass, rho, d, g, CG, kappa, Cnalpha_fin, Cr, Ct, s, N = self.params
         m = Matrix([w1, w2, w3, v1, v2, v3, qw, qx, qy, qz]) # State vector
         n = Matrix([delta1]) # Input vector
 
@@ -587,10 +618,16 @@ class Controls:
             T2: thrust[1],
             T3: thrust[2],
             mass: Float(mass_rocket),
-            rho: Float(1.225), # kg/m^3 temp constant rho
-            A: pi * Float((7.87/100/2)**2), # m^2 reference area
-            g: Float(9.81), # m/s^2
             CG: Float(CoG), # m center of gravity
+            rho: Float(1.225), # kg/m^3 temp constant rho
+            g: Float(-9.81), # m/s^2
+            N: Float(4), # number of fins
+            d: Float(7.87/100) , # m rocket diameter
+            Cr: Float(18.0/100), # m fin root chord
+            Ct: Float(5.97/100), # m fin tip chord
+            s: Float(8.76/100), # m fin span
+            Cnalpha_fin: Float(2.72025), # fin normal force coefficient derivative
+            kappa: rad(0.01), # rad fin cant angle, assume 0 for ideal rocket flight
             self.t_sym: Float(t)
         }
 
@@ -919,6 +956,7 @@ class Controls:
             # Control law
             K = self.control_law(xhat, t)
             u = np.clip(-K @ (xhat - self.x0) + self.u0, np.deg2rad(-8), np.deg2rad(8))
+            # u = np.array([0.0])  # For testing, set aileron to 0
 
             # log + advance time
             self.states.append(xhat.copy())
@@ -984,7 +1022,7 @@ class Controls:
             # Gain scheduling based on vertical velocity
             K = self.control_law(xhat, t)
             u = np.clip(-K @ (xhat - self.x0) + self.u0, np.deg2rad(-8), np.deg2rad(8))
-            # u = np.array([0.0])  # For testing, set aileron to 0
+            u = np.array([0.0])  # For testing, set aileron to 0
             
             self.states.append(xhat)
             self.inputs.append(u)
