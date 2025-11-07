@@ -29,7 +29,7 @@ class SilSim:
         self.csv_output_path = "Maurice2/data/testing.csv"
         self.csv_col_title = "input"
         self.DATA_DIR = Path(__file__).resolve().parents[1] / "data"   # => Maurice2/data
-
+        self.u_bias = 0.0  # integrator bias for control input
 
     def set_controller(
             self,
@@ -160,17 +160,37 @@ class SilSim:
         B = np.array(B).astype(np.float64)
         C = np.array(C).astype(np.float64)
 
-        # ## Get K and L matrices ##
+        ## Get K and L matrices ##
         K, L = self.controller.control_law(xhat=xhat, t=time), self.controller.L
+        xdes = xhat.copy()
+        xdes[2] = 0.0 # desired w3 = 0 rad/s
+        u = np.clip(-K @ (np.array(xhat) - np.array(xdes)) + self.controller.u0, np.deg2rad(-8), np.deg2rad(8))
+
+
+        # # integrator on rate error to create a feedforward bias
+        # tau = 1
+        
+        # b = B[2,0] if B[2,0] != 0 else 1e-6  # prevent divide by zero
+        # Ki_w3 = ((4/tau)**2)/b
+        # w3_err = xhat[2] - 0.0
+        # self.u_bias += -Ki_w3 * w3_err * self.controller.dt        # integrate (note sign)
+        # u_fb    = -(K @ (np.array(xhat) - np.array(xdes))) + self.controller.u0
+        # u_raw   = u_fb + self.u_bias
+        # u       = np.clip(u_raw, np.deg2rad(-8), np.deg2rad(8))
+
+        # # anti-windup: freeze integrator when saturated in the same direction
+        # if (u_raw >  np.deg2rad(8)  and w3_err < 0) or \
+        # (u_raw < -np.deg2rad(8)  and w3_err > 0):
+        #     self.u_bias -= -Ki_w3 * w3_err * self.controller.dt
+
 
         accel_T = self.controller.get_thrust_accel(t=time)
         accel_g = self.controller.get_gravity_accel(xhat=xhat)
         # test = xhat + (A @ xhat + B @ u_prev + accel_T + accel_g) * self.controller.dt
-        xhatdot = A @ xhat + B @ u_prev + accel_T + accel_g \
+        xhatdot = A @ xhat + B @ u + accel_T + accel_g \
                 - L @ (C @ xhat - y)
         xhat = xhat + xhatdot * self.controller.dt
         xhat[6:10] /= np.linalg.norm(xhat[6:10])
-        u = np.clip(-K @ (xhat - self.controller.x0) + self.controller.u0, np.deg2rad(-8), np.deg2rad(8))
 
         # f_subs = np.array(self.controller.f_subs, dtype=float).reshape(-1)
         # xhatdot = f_subs - L @ (C @ xhat - y)
@@ -184,7 +204,6 @@ class SilSim:
         # xhat[6:10] = np.array([1.,0.,0.,0.]) if qn < 1e-12 else xhat[6:10]/qn
         # K = self.controller.control_law(xhat, time)
         # u = np.clip(-K @ (xhat - self.controller.x0) + self.controller.u0, np.deg2rad(-8), np.deg2rad(8))
-
         
         # u = np.array([0.0]) # Temporary: disable control for testing
         fins.aileronAngles = u
@@ -195,7 +214,7 @@ class SilSim:
         self.states.append(state)
 
         print("Time: " + str(np.float64(time).round(3)) + " s, v3: " + str(np.float64(state[5]).round(3)) + " m/s, w3: " + str(np.float64(state[12]).round(3)) + " rad/s, u: " + str(np.rad2deg(u).round(3)) + " degrees.")
-
+        # print("Time:" + str(np.float64(time).round(3)) + " s, xhat: " + str(np.array(xhat).round(3)))
         return u
 
     # TODO: Check rocket params
@@ -235,10 +254,10 @@ class SilSim:
             nozzle_radius= (10 / 1000), 
             grain_number=5,
             grain_density=1800, # Fixed grain density 18 --> 1800 kg·m^3
-            grain_outer_radius= 16 / 1000,  
+            grain_outer_radius= 16 / 1000,
             grain_initial_inner_radius= 6 / 1000,  
-            grain_initial_height= 57 / 1000,  
-            grain_separation=0.01,  
+            grain_initial_height= 57 / 1000,
+            grain_separation=0.01,
             grains_center_of_mass_position=-0.1044,  # Estimated
             center_of_dry_mass_position=-0.122,  # Estimated
             nozzle_position=-0.3,
@@ -265,7 +284,7 @@ class SilSim:
             tip_chord=5.97/100,
             span=8.76/100,
             rocket_radius=7.87/2/100,
-            cant_angle=0.01,
+            cant_angle=0.1,
             sweep_length=14.3/100,
         )
 
@@ -417,21 +436,27 @@ class SilSim:
 # Run SIL simulation, export flight data to CSV
 def main():
     ## Define gain matrix ##
-    K_pre_max = 1.0e-0
-    K_pre_min = 1.0e-1
-
+    # K_pre_max = 1.0e-1
+    # K_pre_min = 5.0e-4
+    K_pre_max = 5.0e-1
+    K_pre_min = 5.0e-1
     K_post_max = 5.0e-1
-    K_post_min = 1.0e-1
+    K_post_min = 5.0e-1
+    # K_post_max = 1.0e-1
+    # K_post_min = 5.0e-3
 
-    pre_width = 10
+    pre_width = 3
     post_width = 8
 
-    pre_v3_mid = 75.0
+    pre_v3_mid = 100.0
     post_v3_mid = 90.0
+
+    # pre_w3_mid = 0.35
+    # post_w3_mid = 0.5
 
     ## Define initial conditions ##
     xhat0 = np.array([0, 0, 0, 0, 0, 0, 1, 0, 0, 0]) # Initial state estimate
-    u0 = np.array([0])
+    u0 = np.array([np.deg2rad(-0.0)])  # Initial control input
     sampling_rate = 40.0  # Hz
     dt = 1.0 / sampling_rate
 
@@ -441,6 +466,10 @@ def main():
                             K_post_max=K_post_max, K_post_min=K_post_min,
                             pre_width=pre_width, post_width=post_width,
                             pre_v3_mid=pre_v3_mid, post_v3_mid=post_v3_mid)
+    # controller.set_K_params(K_pre_max=K_pre_max, K_pre_min=K_pre_min,
+    #                         K_post_max=K_post_max, K_post_min=K_post_min,
+    #                         pre_width=pre_width, post_width=post_width,
+    #                         pre_v3_mid=pre_w3_mid, post_v3_mid=post_w3_mid)
     # controller.buildL(lw=10.0, lqw=1.0, lqx=2.0, lqy=2.0, lqz=2.0)
     lw = 5e-3 # any higher makes the simulation unstable for some dumb reason
     lq = 5e-3
@@ -453,6 +482,7 @@ def main():
     sim = SilSim(sampling_rate=sampling_rate, controller=controller)
     flight, controller = sim.run(sampling_rate=sampling_rate)
     sim.export_states()
+    
 
 if __name__ == "__main__":
     main()

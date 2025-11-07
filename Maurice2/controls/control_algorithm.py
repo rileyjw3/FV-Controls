@@ -366,7 +366,7 @@ class Controls:
         
         M1, M2 = 0, 0
         # Verify later with data points
-        M3 = deg(delta1)/8 * (-2.21e-09*(v3**3) 
+        M3 = 4*deg(delta1)/8 * (-2.21e-09*(v3**3) 
                         + 1.58e-06*(v3**2) 
                         + 4.18e-06*v3
                         ) # v3 = vertical velocity, Mz = roll moment
@@ -467,11 +467,9 @@ class Controls:
         F = T + Fd + Fl + Fg # Thrust + Drag + Lift + Gravity
 
         ## Cnalpha ##
-        # TODO: Show how this is calculated from OpenRocket data
         Cnalpha = 0.207  # Linear assumption of Cn vs AoA slope from OpenRocket data (fitted to quadratic, minimal x^2 coefficient)
 
         ## Stability Margin ##
-        # TODO: Potential to implement our own polynomial fitting function instead of using hardcoded coefficients from Google Sheets
         AoA_deg = AoA_eff * 180 / pi # Convert AoA to degrees for polynomial fit
         SM = 0
         if not post_burnout:
@@ -482,26 +480,20 @@ class Controls:
         ## Corrective moment coefficient ##
         # Multiplying by stability because CG is where rotation is about and CP is where force is applied
             # SM = (CP - CG) / d
-        # TODO: Show how this is calculated (Apogee Rocketry report reference)
         C_raw = H * v_mag**2 * A * Cnalpha * AoA_eff * (SM * d) * rho / 2 # See if it's Cnalpha or Cn, Cn = Cnalpha * AoA_eff
         Ccm = Matrix([C_raw * sin(beta), -C_raw * cos(beta), 0])  # Corrective moment vector
 
         ## Propulsive Damping Moment Coefficient (Cdp) ##
-        # TODO: Show how this is calculated (Apogee Rocketry report reference)
         mdot = self.prop_mass / self.t_motor_burnout # kg/s, average mass flow rate during motor burn
         Cdp = mdot * (self.L_ne - CG)**2 # kg*m^2/s
 
         ## Aerodynamic Damping Moment Coefficient (Cda) ##
-        # TODO: Show how this is calculated (Apogee Rocketry report reference)
         Cda = H * (rho * v_mag * A / 2) * (Cnalpha * AoA_eff * (SM * d)**2)
 
         ## Damping Moment Coefficient (Cdm) ##
         Cdm = Cdp + Cda
 
         ## Moment due to aileron deflection ##
-        # Fin misalignment moment, remove for 0 roll (ideal rocket flight)
-        # M_fin = 5.5 * (Float(1)/2 * rho * v_mag**2) * Matrix([0, 0, 1e-6])
-
         gamma = Ct/Cr
         r_t = d/2
         tau = (s + r_t) / r_t
@@ -526,7 +518,7 @@ class Controls:
         
         M1 = M_fin[0] + Ccm[0] - Cdm * w1
         M2 = M_fin[1] + Ccm[1] - Cdm * w2
-        M3 = M_fin[2] + Ccm[0] + M_delta[2]
+        M3 = M_fin[2] + Ccm[2] + M_delta[2]
 
         ## Quaternion kinematics ##
         S = Matrix([[0, -w3, w2],
@@ -627,7 +619,7 @@ class Controls:
             Ct: Float(5.97/100), # m fin tip chord
             s: Float(8.76/100), # m fin span
             Cnalpha_fin: Float(2.72025), # fin normal force coefficient derivative
-            kappa: rad(0.01), # rad fin cant angle, assume 0 for ideal rocket flight
+            kappa: rad(0.1), # rad fin cant angle, assume 0 for ideal rocket flight
             self.t_sym: Float(t)
         }
 
@@ -726,6 +718,35 @@ class Controls:
             Kmin = self.Ks[3]
             v3_mid = 80 # m/s, tune as necessary hiii dan :3
             K_val = Kmin + (Kmax - Kmin) / (1 + exp((v3 - self.post_v3_mid)/self.post_transition_width))
+        K = np.zeros((1, 10))
+        K[0][2] = K_val
+
+        return K
+    
+    def control_law2(self, xhat: np.array, t: float):
+        """Compute the control input based on the current state estimate and gain matrix.
+
+        Args:
+            xhat (np.array): The estimated state vector.
+            t (float): The current time in seconds.
+        Returns:
+            np.ndarray: The computed gain matrix K.
+        """
+        ## Gain scheduling based on roll rate ##
+        w3 = xhat[2]
+
+        # Preburnout
+        if (t < self.t_motor_burnout):
+            Kmax = self.Ks[0]
+            Kmin = self.Ks[1]
+            K_val = Kmin + (Kmax - Kmin) / (1 + exp((w3 - self.pre_v3_mid)/self.pre_transition_width))
+
+        # Postburnout
+        else:
+            Kmax = self.Ks[2]
+            Kmin = self.Ks[3]
+            # v3_mid = 80 # m/s, tune as necessary hiii dan :3
+            K_val = Kmin + (Kmax - Kmin) / (1 + exp((w3 - self.post_v3_mid)/self.post_transition_width))
         K = np.zeros((1, 10))
         K[0][2] = K_val
 
@@ -1007,6 +1028,11 @@ class Controls:
             A = np.array(self.A.n()).astype(np.float64)
             B = np.array(self.B.n()).astype(np.float64)
             C = np.array(self.C.n()).astype(np.float64)
+
+            # Gain scheduling based on vertical velocity
+            K = self.control_law(xhat, t)
+            u = np.clip(-K @ (xhat - self.x0) + self.u0, np.deg2rad(-8), np.deg2rad(8))
+            # u = np.array([0.0])  # For testing, set aileron to 0
             
             ## Control Law ##
             theta, phi, psi = self.quat_to_euler_xyz(xhat[6:10])  # Convert quaternion to Euler angles
@@ -1018,11 +1044,6 @@ class Controls:
                     # - self.L @ (C @ xhat - y)
             xhat = xhat + xdot * self.dt
             xhat[6:10] /= np.linalg.norm(xhat[6:10])
-
-            # Gain scheduling based on vertical velocity
-            K = self.control_law(xhat, t)
-            u = np.clip(-K @ (xhat - self.x0) + self.u0, np.deg2rad(-8), np.deg2rad(8))
-            u = np.array([0.0])  # For testing, set aileron to 0
             
             self.states.append(xhat)
             self.inputs.append(u)

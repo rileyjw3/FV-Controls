@@ -60,7 +60,7 @@ class Fins(TrapezoidalFins):
 
     def computeAileronMoment(self, stream_velocity):
         delta1 = self.aileronAngles
-        Mz = np.rad2deg(delta1[0])/8 * (-2.21e-09*(stream_velocity[2]**3) 
+        Mz = 4 * np.rad2deg(delta1[0])/8 * (-2.21e-09*(stream_velocity[2]**3) 
                             + 1.58e-06*(stream_velocity[2]**2) 
                             + 4.18e-06*stream_velocity[2] 
                             )
