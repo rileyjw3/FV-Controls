@@ -39,6 +39,7 @@ class Controls:
         self.csv_path = self.csv_path = (
             Path(__file__).resolve().parents[1] / "data" / "openrocket_data.csv"
         )
+        self.max_delta : float = 8 # degrees
         self.A : Matrix = None
         self.B : Matrix = None
         self.C : Matrix = None
@@ -355,7 +356,7 @@ class Controls:
         ])
 
     
-    def getAileronMoment(self, delta1: Symbol, v3: Symbol):
+    def get_control_surface_moment(self, delta1: Symbol, v3: Symbol):
         """Get the aileron moment based on the aileron angle.
 
         Args:
@@ -515,7 +516,7 @@ class Controls:
 
         M_fin = Matrix([0, 0, M_f - M_d])
 
-        M_delta = self.getAileronMoment(delta1, v3)
+        M_delta = self.get_control_surface_moment(delta1, v3)
         
         M1 = M_fin[0] + Ccm[0] - Cdm * w1
         M2 = M_fin[1] + Ccm[1] - Cdm * w2
@@ -977,7 +978,7 @@ class Controls:
 
             # Control law
             K = self.control_law(xhat, t)
-            u = np.clip(-K @ (xhat - self.x0) + self.u0, np.deg2rad(-8), np.deg2rad(8))
+            u = np.clip(-K @ (xhat - self.x0) + self.u0, np.deg2rad(-self.max_delta), np.deg2rad(self.max_delta))
             # u = np.array([0.0])  # For testing, set aileron to 0
 
             # log + advance time
@@ -1003,7 +1004,7 @@ class Controls:
             xhat = xhat + f_subs * self.dt
             xhat[6:10] /= np.linalg.norm(xhat[6:10])
             K = self.control_law(xhat, t)
-            u = np.clip(-K @ (xhat - self.x0) + self.u0, np.deg2rad(-8), np.deg2rad(8))
+            u = np.clip(-K @ (xhat - self.x0) + self.u0, np.deg2rad(-self.max_delta), np.deg2rad(self.max_delta))
             # u = np.array([0.0])  # For testing, set aileron to 0
 
             self.states.append(xhat)
@@ -1032,7 +1033,7 @@ class Controls:
 
             # Gain scheduling based on vertical velocity
             K = self.control_law(xhat, t)
-            u = np.clip(-K @ (xhat - self.x0) + self.u0, np.deg2rad(-8), np.deg2rad(8))
+            u = np.clip(-K @ (xhat - self.x0) + self.u0, np.deg2rad(-self.max_delta), np.deg2rad(self.max_delta))
             # u = np.array([0.0])  # For testing, set aileron to 0
             
             ## Control Law ##

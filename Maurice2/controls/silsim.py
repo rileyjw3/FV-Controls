@@ -20,6 +20,12 @@ class SilSim:
             sampling_rate: float,
             controller: Controls
     ):
+        """Initialize the SIL simulation with the given sampling rate and controller.
+
+        Args:
+            sampling_rate (float): The sampling rate for the simulation in Hz.
+            controller (Controls): The controller object to be used in the simulation.
+        """
         self.sampling_rate = sampling_rate
         self.controller = controller
         self.times = []
@@ -150,22 +156,21 @@ class SilSim:
 
         ## Get previous control input ##
         fins : Fins = interactive_objects[0]  # Assuming fins are the first/only interactive object
-        u_prev = fins.aileronAngles
-
-        ## Compute control/observer matrices ##
-        self.controller.computeAB(t=time, xhat=xhat, u=u_prev)
-        self.controller.computeC(xhat=xhat, u=u_prev)
-        A, B, C = self.controller.A, self.controller.B, self.controller.C
-        A = np.array(A).astype(np.float64)
-        B = np.array(B).astype(np.float64)
-        C = np.array(C).astype(np.float64)
-
+        # u_prev = fins.aileronAngles
+        
         ## Get K and L matrices ##
         K, L = self.controller.control_law(xhat=xhat, t=time), self.controller.L
         xdes = xhat.copy()
         xdes[2] = 0.0 # desired w3 = 0 rad/s
         u = np.clip(-K @ (np.array(xhat) - np.array(xdes)) + self.controller.u0, np.deg2rad(-8), np.deg2rad(8))
 
+        ## Compute control/observer matrices ##
+        self.controller.computeAB(t=time, xhat=xhat, u=u)
+        self.controller.computeC(xhat=xhat, u=u)
+        A, B, C = self.controller.A, self.controller.B, self.controller.C
+        A = np.array(A).astype(np.float64)
+        B = np.array(B).astype(np.float64)
+        C = np.array(C).astype(np.float64)
 
         # # integrator on rate error to create a feedforward bias
         # tau = 1
@@ -436,14 +441,14 @@ class SilSim:
 # Run SIL simulation, export flight data to CSV
 def main():
     ## Define gain matrix ##
-    # K_pre_max = 1.0e-1
-    # K_pre_min = 5.0e-4
-    K_pre_max = 5.0e-1
-    K_pre_min = 5.0e-1
-    K_post_max = 5.0e-1
-    K_post_min = 5.0e-1
-    # K_post_max = 1.0e-1
-    # K_post_min = 5.0e-3
+    K_pre_max = 1.0e-1
+    K_pre_min = 5.0e-4
+    # K_pre_max = 5.0e-1
+    # K_pre_min = 5.0e-1
+    # K_post_max = 5.0e-1
+    # K_post_min = 5.0e-1
+    K_post_max = 1.0e-1
+    K_post_min = 5.0e-3
 
     pre_width = 3
     post_width = 8
@@ -471,8 +476,8 @@ def main():
     #                         pre_width=pre_width, post_width=post_width,
     #                         pre_v3_mid=pre_w3_mid, post_v3_mid=post_w3_mid)
     # controller.buildL(lw=10.0, lqw=1.0, lqx=2.0, lqy=2.0, lqz=2.0)
-    lw = 5e-3 # any higher makes the simulation unstable for some dumb reason
-    lq = 5e-3
+    lw = 1e-3 # any higher makes the simulation unstable for some dumb reason
+    lq = 1e-3
     controller.buildL(lw=lw, lqw=lq, lqx=lq, lqy=lq, lqz=lq)
     # controller.buildL(lw=40 , lqw=0.01, lqx=0.5, lqy=0.5, lqz=0.5)
     # controller.buildL(lw=5.0 , lqw=0.5, lqx=1, lqy=1, lqz=1)
