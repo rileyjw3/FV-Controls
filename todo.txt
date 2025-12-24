@@ -1,0 +1,5 @@
+Create an automated process to set up new rocket environment
+with all necessary folders, fill-in-the-blank type Jupyter noteobok
+created automatically. 
+
+Create getters for rocket params
