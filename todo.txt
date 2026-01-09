@@ -14,6 +14,11 @@ Understand wtf is going on with the sensors, provide template
 for sensor fusion maybe? Just create a Sensor class to house
 all sensor tools necessary to create an accurate sensor model.
 
-Address var_list_to_str issue, don't rely on state variables to
-read the csv file, just read the headers instead of requiring 
-a dynamics object or controls object for variable names.
+For silsim.py, write plot functions and a controls vs state
+estimation graph
+
+CRITICAL ISSUE: Fix issue with v_wind causing simulation errors!!
+
+Kinda issue: find missing affine term for Ax + Bu that results in
+the simulation ending ~2 seconds before it should (see controls 
+dynamics comparison graph)

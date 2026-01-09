@@ -38,6 +38,9 @@ class Controls(Dynamics):
 
         self.sensor_model : Callable = None  # User-defined sensor output function
 
+        # Cached numeric helpers
+        self._A_numeric = None
+        self._B_numeric = None
 
     def set_symbols(self):
         """Set the symbolic variables for the control inputs. Supersedes the parent method to include control surface deflection angle.
@@ -90,22 +93,14 @@ class Controls(Dynamics):
                 raise ValueError(f"Controls parameter '{param}' not set. Please set it before running the simulation.")
     
     
-    def get_moments(self, burnout: bool) -> Matrix:
+    def get_moments(self) -> Matrix:
         """Get the total moments acting on the rocket, including contributions from control surfaces.
         Supersedes the parent method to include control surface moments.
-
-        Args:
-            burnout (bool): Whether the rocket is in the pre-burnout or post-burnout phase. (True for post-burnout)
 
         Returns:
             Matrix: Total moments acting on the rocket.
         """
-        
-        M_dynamics : Matrix = super().get_moments(burnout)
-        
-        if self.IREC_COMPLIANT and not burnout:
-            return M_dynamics
-        
+        M_dynamics : Matrix = super().get_moments()
         M_controls : Matrix = self.M_controls_func(self.state_vars, self.input_vars)
         self.M = M_dynamics + M_controls
         
@@ -140,47 +135,92 @@ class Controls(Dynamics):
         self.f_subs_full = self.f_subs_full.subs(n_e)
     
     
-    def get_AB(self, t: float, xhat: Matrix, u: Matrix) -> tuple:
-        """Compute the A and B matrices for linearized state-space representation.
-        supersedes the parent method to include control surface deflection angle.
-        Args:
-            xhat (Matrix): State vector at which to linearize.
-            u (Matrix): Input vector at which to linearize.
-        Returns:
-            tuple: A and B matrices.
-        """
-        self.set_f(t=t, xhat=xhat, u=u)
+    def _compile_linearization_funcs(self):
+        """Lazily lambdify Jacobians for A and B matrices."""
+        if self._A_numeric is not None and self._B_numeric is not None:
+            return
+        if self.f is None or self.state_vars is None:
+            self.define_eom()
+
         w1, w2, w3, v1, v2, v3, qw, qx, qy, qz = self.state_vars
-        zeta = self.input_vars[0]
+        eps = Float(1e-9)
+        vxy = sqrt(v1**2 + v2**2 + eps**2)
+        repl = {
+            sqrt(v1**2 + v2**2): vxy,
+            (v1**2 + v2**2)**(Float(1)/2): vxy,
+        }
+
+        def _prep(expr: Matrix):
+            return expr.xreplace(repl)
+
         m = Matrix(self.state_vars)
         n = Matrix(self.input_vars)
-        m_e = {
-            w1: xhat[0],
-            w2: xhat[1],
-            w3: xhat[2],
-            v1: xhat[3],
-            v2: xhat[4],
-            v3: xhat[5],
-            qw: xhat[6],
-            qx: xhat[7],
-            qy: xhat[8],
-            qz: xhat[9],
-        }
-        n_e = {
-            zeta: u[0]
-        }
-        A : Matrix = self.f_subs_params.jacobian(m).subs(m_e).subs(n_e).n()
-        B : Matrix = self.f_subs_params.jacobian(n).subs(m_e).subs(n_e).n()
+        arg_syms = self.state_vars + self.input_vars + self.params + [self.t_sym]
 
-        self.A_sym = A
-        self.B_sym = B
-        
-        A_num = np.array(A).astype(np.float64)
-        B_num = np.array(B).astype(np.float64)
-        self.A = A_num
-        self.B = B_num
+        expr = _prep(self.f)
 
-        return A_num, B_num
+        self._A_numeric = lambdify(arg_syms, expr.jacobian(m), modules="numpy")
+        self._B_numeric = lambdify(arg_syms, expr.jacobian(n), modules="numpy")
+
+
+    def _compile_numeric_funcs(self):
+        """Lazily lambdify EOM including control inputs."""
+        if self._f_numeric is not None:
+            return
+        if self.f is None or self.state_vars is None:
+            self.define_eom()
+
+        w1, w2, w3, v1, v2, v3, qw, qx, qy, qz = self.state_vars
+        eps = Float(1e-9)
+        vxy = sqrt(v1**2 + v2**2 + eps**2)
+        repl = {
+            sqrt(v1**2 + v2**2): vxy,
+            (v1**2 + v2**2)**(Float(1)/2): vxy,
+        }
+
+        def _prep(expr: Matrix):
+            return expr.xreplace(repl)
+
+        arg_syms = self.state_vars + self.input_vars + self.params + [self.t_sym]
+        self._f_numeric = lambdify(arg_syms, _prep(self.f), modules="numpy")
+
+
+    def f_numeric(self, t: float, x: np.ndarray, u: np.ndarray = None) -> np.ndarray:
+        """Fast numeric evaluation of EOM including control inputs."""
+        self.checkParamsSet()
+        self._compile_numeric_funcs()
+
+        state_vals = np.asarray(x, dtype=float).tolist()
+        if u is None:
+            input_vals = [0.0] * len(self.input_vars)
+        else:
+            input_vals = np.asarray(u, dtype=float).tolist()
+
+        param_vals = self._gather_param_values(t)
+        result = self._f_numeric(*(state_vals + input_vals + param_vals + [float(t)]))
+        return np.array(result, dtype=float).reshape(-1)
+    
+    
+    def get_AB(self, t: float, xhat: Matrix, u: Matrix) -> tuple:
+        """Compute the A and B matrices for linearized state-space representation using cached lambdified Jacobians."""
+        self.checkParamsSet()
+        self._compile_linearization_funcs()
+
+        param_vals = self._gather_param_values(t)
+        args = (
+            np.asarray(xhat, dtype=float).tolist()
+            + np.asarray(u, dtype=float).tolist()
+            + param_vals
+            + [float(t)]
+        )
+
+        A = np.array(self._A_numeric(*args), dtype=np.float64)
+        B = np.array(self._B_numeric(*args), dtype=np.float64)
+
+        self.A = A
+        self.B = B
+
+        return A, B
 
 
     def get_C(self, xhat: np.ndarray):

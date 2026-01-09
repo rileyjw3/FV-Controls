@@ -38,17 +38,21 @@ class Simulation():
         # Dynamics logs
         self.dynamics_states = []
         self.dynamics_times = []
+        self.dynamics_aoa = []  # Angle of attack log
         
         # Controls logs
         self.controls_states = []
         self.controls_inputs = []
         self.controls_input_moments = []
         self.controls_times = []
+        self.controls_aoa = []  # Angle of attack log for controls runs
         
         # CSV logging path
-        self.root = Path(__file__).resolve().parents[2]  # …/FV-Controls        
-        self.dynamics_file_name : str = None
-        self.controls_file_name : str = None
+        self.root = Path(__file__).resolve().parents[2]  # …/FV-Controls  
+        self.dynamics_path : str = None
+        self.controls_path : str = None
+        self.dynamics_metadata : dict = {}
+        self.controls_metadata : dict = {}
 
 
     def set_dynamics(self, dynamics: Dynamics):
@@ -88,13 +92,20 @@ class Simulation():
             A = self.dynamics.getA(t, xhat)
             xdot = A @ xhat + self.dynamics.get_gravity_accel(xhat) + self.dynamics.get_thrust_accel(t)
         else:
-            self.dynamics.set_f(t, xhat)
-            xdot = np.array(self.dynamics.f_subs_full, dtype=float).reshape(-1)
+            xdot = self.dynamics.f_numeric(t, xhat)
         xhat = xhat + xdot * self.dynamics.dt
         xhat[6:10] /= np.linalg.norm(xhat[6:10])
 
         self.dynamics_states.append(xhat)
         self.dynamics_times.append(t)
+        
+        # AoA logging
+        try:
+            aoa = float(self.dynamics.get_AoA(getattr(self.dynamics, "v_wind", [0.0, 0.0]), xhat))
+            self.dynamics_aoa.append(aoa)
+        except Exception:
+            self.dynamics_aoa.append(None)
+        
         # if xhat[5] < 0:
         #     print("Warning: Longitudinal velocity v3 is negative at time t =", t)
         return xhat
@@ -112,17 +123,10 @@ class Simulation():
         """
         dt = self.dynamics.dt
         
-        self.dynamics.set_f(t, xhat)
-        k1 = np.array(self.dynamics.f_subs_full, dtype=float).reshape(-1)
-        
-        self.dynamics.set_f(t + dt/2, xhat + k1 * dt/2)
-        k2 = np.array(self.dynamics.f_subs_full, dtype=float).reshape(-1)
-        
-        self.dynamics.set_f(t + dt/2, xhat + k2 * dt/2)
-        k3 = np.array(self.dynamics.f_subs_full, dtype=float).reshape(-1)
-        
-        self.dynamics.set_f(t + dt, xhat + k3 * dt)
-        k4 = np.array(self.dynamics.f_subs_full, dtype=float).reshape(-1)
+        k1 = self.dynamics.f_numeric(t, xhat)
+        k2 = self.dynamics.f_numeric(t + dt/2, xhat + k1 * dt/2)
+        k3 = self.dynamics.f_numeric(t + dt/2, xhat + k2 * dt/2)
+        k4 = self.dynamics.f_numeric(t + dt, xhat + k3 * dt)
         
         xhat = xhat + (dt/6) * (k1 + 2*k2 + 2*k3 + k4)
         xhat[6:10] /= np.linalg.norm(xhat[6:10])
@@ -135,22 +139,35 @@ class Simulation():
         return xhat
 
 
-    def controls_step(self, t: float, xhat: np.ndarray, u: np.ndarray) -> np.ndarray:
+    def controls_step(self, t: float, xhat: np.ndarray, u: np.ndarray, x: np.ndarray = None) -> tuple:
         """Perform a single simulation step, updating the state based on dynamics and control inputs.
         Forward Euler method with ***linearized dynamics*** :math:`(xdot=Ax+Bu-L(Cx-y))`.
+        Enabling IREC compliance within the Controls object will disable controls during motor burn and
+            override/automate disable_controls flag.
 
         Args:
             t (float): Current time.
             xhat (np.ndarray): Current state vector.
             u (np.ndarray): Control input vector.
+            x (np.ndarray): True state vector for sensor measurements. Not used if sensors are disabled.
         Returns:
-            np.ndarray: Updated state vector after the simulation step.
+            tuple: Updated state and input vectors after the simulation step.
         """
+        if self.controls.IREC_COMPLIANT:
+            # Disable controls during motor burn for IREC compliance
+            if t < self.controls.t_motor_burnout:
+                self.disable_controls = True
+            else:
+                self.disable_controls = False
+
         if not self.disable_controls:
         # If controls are enabled, compute control input using state feedback
             K = self.controls.K(t, xhat)
             # Subtract self.controls.x0 because it is the desired angular state (No pitch, yaw, roll rates)
             u = np.clip(-K @ (xhat - self.controls.x0) + u, -self.controls.max_input, self.controls.max_input)
+        else:
+            # If controls are disabled, use zero control input
+            u = np.zeros_like(u)
         
         # Get linearized dynamics matrices
         A, B = self.controls.get_AB(t, xhat, u)
@@ -161,7 +178,7 @@ class Simulation():
         if not self.disable_sensors:
             # Get C matrix and sensor output
             C = self.controls.get_C(xhat)
-            y = self.controls.sensor_model(t, xhat)
+            y = self.controls.sensor_model(t, x)
             xdot -= self.controls.L @ (C @ xhat - y)
         
         # Forward Euler integration
@@ -169,10 +186,17 @@ class Simulation():
         
         # Normalize quaternion
         xhat[6:10] /= np.linalg.norm(xhat[6:10])
-        
+
         self.controls_states.append(xhat)
         self.controls_inputs.append(u)
         self.controls_times.append(t)
+        
+        # AoA logging
+        try:
+            aoa = float(self.controls.get_AoA(getattr(self.controls, "v_wind", [0.0, 0.0]), xhat))
+            self.controls_aoa.append(aoa)
+        except Exception:
+            self.controls_aoa.append(None)
         
         return xhat, u
     
@@ -186,8 +210,9 @@ class Simulation():
             show_progress (bool): Whether to display a progress bar during the run. Default is True.
             linearized (bool): Whether to use linearized dynamics (xdot = Ax) or nonlinearized (xdot = f(x)). Default is False (nonlinearized).
         """
-        assert rk4 != linearized, "Cannot use both RK4 and linearized dynamics. Please choose one."
-        
+        if rk4 is True and linearized is True:
+            raise ValueError("RK4 integration cannot be used with linearized dynamics. Please set linearized to False when using RK4.")
+                
         if file_name is None:
             raise ValueError("Please provide a file name to save the dynamics data as CSV after simulation.")
 
@@ -260,8 +285,12 @@ class Simulation():
         state_cols = self.var_list_to_str(self.dynamics.state_vars)
         dynamics_df = pd.DataFrame(self.dynamics_states, columns=state_cols)
         dynamics_df.insert(0, 'time', self.dynamics_times)
+        if len(self.dynamics_aoa) == len(self.dynamics_times):
+            dynamics_df['AoA'] = self.dynamics_aoa
 
         dynamics_df.to_csv(file_path, index=False)
+        self._append_metadata_comment(file_path, "motor_burnout_time", getattr(self.dynamics, "t_motor_burnout", None))
+        self._append_metadata_comment(file_path, "launch_rail_clearance_time", getattr(self.dynamics, "t_launch_rail_clearance", None))
 
 
     def save_controls_to_csv(self, file_path: str):
@@ -276,61 +305,94 @@ class Simulation():
         controls_df.insert(0, 'time', self.controls_times)
         controls_inputs_df = pd.DataFrame(self.controls_inputs, columns=input_cols)
         controls_df = pd.concat([controls_df, controls_inputs_df], axis=1)
+        if len(self.controls_aoa) == len(self.controls_times):
+            controls_df['AoA'] = self.controls_aoa
         if len(self.controls_input_moments) > 0:
             moments_arr = np.vstack([np.array(m, dtype=float).reshape(-1) for m in self.controls_input_moments])
             controls_moments_df = pd.DataFrame(moments_arr, columns=['M1', 'M2', 'M3'])
             controls_df = pd.concat([controls_df, controls_moments_df], axis=1)
         controls_df.to_csv(file_path, index=False, mode='w')
+        self._append_metadata_comment(file_path, "motor_burnout_time", getattr(self.controls, "t_motor_burnout", None))
+        self._append_metadata_comment(file_path, "launch_rail_clearance_time", getattr(self.controls, "t_launch_rail_clearance", None))
         
 
-    def read_dynamics_from_csv(self, file_name: str):
-        """Read dynamics data from a CSV file and populate the logged states and times.
+    def read_dynamics_from_csv(self, file_name: str = None, file_path: str = None):
+        """Read dynamics data from a CSV file and populate the logged states and times. If file_path is provided, it overrides file_name.
 
         Args:
             file_name (str): File name to read the dynamics data from CSV.
+            file_path (str): Optional full file path to read the dynamics data from CSV. If provided, overrides file_name.
         Returns:
             states (list): List of state vectors read from the CSV file.
             times (list): List of time values read from the CSV file.
         """
-        if self.dynamics.state_vars is None:
-            self.dynamics.set_symbols()
-        states = None
-        times = None
-        if file_name is not None:
-            file_path = self.dynamics_path / f"{file_name}.csv"
-            df = pd.read_csv(file_path)
-            times = df['time'].to_numpy()
-            states = df[self.var_list_to_str(self.dynamics.state_vars)].to_numpy()
+        path = None
+        if file_path is not None:
+            path = file_path
+        elif file_name is not None:
+            path = self.dynamics_path / f"{file_name}.csv"
+        else:
+            raise ValueError("Please provide either file_name or file_path to read the dynamics data from CSV.")
+        
+        df = pd.read_csv(path, comment='#')
+        times = df['time'].to_numpy() if 'time' in df.columns else None
+        # Use whatever headers exist in the CSV (except time/AoA) to avoid depending on a Dynamics instance.
+        state_cols = [col for col in df.columns if col not in ('time', 'AoA')]
+        states = df[state_cols].to_numpy()
+        self.dynamics_metadata = self._read_metadata_comments(path)
             
         return times, states
     
 
-    def read_controls_from_csv(self, file_name: str):
+    def read_controls_from_csv(self, file_name: str = None, file_path: str = None):
         """Read controls data from a CSV file and populate the logged states, inputs, and times.
 
         Args:
             file_name (str): File name to read the controls data from CSV.
+            file_path (str): Optional full file path to read the controls data from CSV. If provided, overrides file_name.
         Returns:
             states (list): List of state vectors read from the CSV file.
             inputs (list): List of input vectors read from the CSV file.
             times (list): List of time values read from the CSV file.
         """
-        if self.controls.state_vars is None or self.controls.input_vars is None:
-            self.controls.set_symbols()
-        states = None
-        inputs = None
-        times = None
-        moments = None
-        if file_name is not None:
-            file_path = self.controls_path / f"{file_name}.csv"
-            df = pd.read_csv(file_path)
-            times = df['time'].to_numpy()
-            states = df[self.var_list_to_str(self.controls.state_vars)].to_numpy()
-            inputs = df[self.var_list_to_str(self.controls.input_vars)].to_numpy()
-            if 'M1' in df.columns and 'M2' in df.columns and 'M3' in df.columns:
-                moments = df[['M1', 'M2', 'M3']].to_numpy()
-            else:
-                moments = None
+        path = None
+        if file_path is not None:
+            path = file_path
+        elif file_name is not None:
+            path = self.controls_path / f"{file_name}.csv"
+        else:
+            raise ValueError("Please provide either file_name or file_path to read the controls data from CSV.")
+
+        df = pd.read_csv(path, comment='#')
+        times = df['time'].to_numpy() if 'time' in df.columns else None
+
+        moment_cols = [col for col in ['M1', 'M2', 'M3'] if col in df.columns]
+        if len(moment_cols) == 3:
+            moments = df[moment_cols].to_numpy()
+        else:
+            moments = None
+
+        # Prefer explicit columns from controls object if available, otherwise infer from headers.
+        input_cols = []
+        state_cols = []
+        if getattr(self, "controls", None) is not None:
+            if getattr(self.controls, "input_vars", None):
+                input_cols = [c for c in self.var_list_to_str(self.controls.input_vars) if c in df.columns]
+            if getattr(self.controls, "state_vars", None):
+                state_cols = [c for c in self.var_list_to_str(self.controls.state_vars) if c in df.columns]
+
+        if not input_cols:
+            # Heuristic: treat columns commonly used for inputs (u*, zeta, delta) as control inputs.
+            candidate_inputs = [c for c in df.columns if c not in ['time'] + moment_cols]
+            input_cols = [c for c in candidate_inputs if c.lower().startswith('u') or c.lower() in {'zeta', 'delta'} or c.lower().startswith('zeta') or c.lower().startswith('delta')]
+
+        if not state_cols:
+            excluded = set(['time'] + input_cols + moment_cols + ['AoA'])
+            state_cols = [c for c in df.columns if c not in excluded]
+
+        states = df[state_cols].to_numpy() if state_cols else None
+        inputs = df[input_cols].to_numpy() if input_cols else None
+        self.controls_metadata = self._read_metadata_comments(path)
             
         return times, states, inputs, moments
 
@@ -342,6 +404,7 @@ class Simulation():
         attitude: bool = True,
         quaternion : bool = False,
         file_name : str = None,
+        file_path : str = None
     ):
         """Plot the state variables over time. Plots angular velocity, linear velocity, and attitude quaternion on separate subplots.\
             Choose to read from CSV file or locally logged data stored in the Dynamics object.
@@ -351,11 +414,12 @@ class Simulation():
             lin_vel (bool): Whether to plot linear velocity.
             attitude (bool): Whether to plot attitude quaternion.
             file_name (str): File name to read the CSV file if reading from CSV. Don't need to include .csv extension. Same as used in save_dynamics_to_csv(). If None, uses locally logged data.
+            file_path (str): File path to read the CSV file if reading from CSV. If None, uses locally logged data.
         """
         states = None
         times = None
-        if file_name is not None:
-            times, states = self.read_dynamics_from_csv(file_name)
+        if file_name is not None or file_path is not None:
+            times, states = self.read_dynamics_from_csv(file_name, file_path)
             if len(states) == 0:
                 raise ValueError("No dynamics data to plot. Please run the dynamics simulation first using run_dynamics_simulation() and save to CSV using save_dynamics_to_csv().")
         else:
@@ -391,20 +455,26 @@ class Simulation():
                 axs[2].set_ylabel('Quaternion Components')
                 axs[2].set_xlabel('Time (s)')
             else:
-                euler_angles = np.array([self.dynamics.quat_to_euler_xyz(q) for q in states[:, 6:10]])
+                euler_angles = np.array([self.quat_to_euler_xyz(q) for q in states[:, 6:10]])
                 axs[2].plot(times, np.rad2deg(euler_angles[:, 0]), label='Pitch (deg)')
                 axs[2].plot(times, np.rad2deg(euler_angles[:, 1]), label='Yaw (deg)')
                 axs[2].plot(times, np.rad2deg(euler_angles[:, 2]), label='Roll (deg)')
                 axs[2].set_title('Attitude Euler Angles vs Time')
             axs[2].legend()
             
-        # Plot vertical line at motor burnout time
-        if self.dynamics.t_motor_burnout is not None:
-            for ax in axs:
-                ax.axvline(x=self.dynamics.t_motor_burnout, color='r', linestyle='--', label='Motor Burnout')
+        # Plot vertical lines using metadata when available
+        burnout_time = self.dynamics_metadata.get("motor_burnout_time") if file_name is not None or file_path is not None else getattr(self.dynamics, "t_motor_burnout", None)
+        launch_clear_time = self.dynamics_metadata.get("launch_rail_clearance_time") if file_name is not None or file_path is not None else getattr(self.dynamics, "t_launch_rail_clearance", None)
+        for ax in axs:
+            if launch_clear_time is not None:
+                ax.axvline(x=float(launch_clear_time), color='b', linestyle='--', label="Launch Rail Clearance")
+            if burnout_time is not None:
+                ax.axvline(x=float(burnout_time), color='r', linestyle='--', label='Motor Burnout')
+            if launch_clear_time is not None or burnout_time is not None:
                 ax.legend()
-                ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+            ax.grid(True, which='both', linestyle='--', linewidth=0.5)
         
+        fig.tight_layout()
         return fig, axs
 
 
@@ -417,6 +487,7 @@ class Simulation():
         control_inputs: bool = True,
         control_moments: bool = False,
         file_name : str = None,
+        file_path : str = None
     ):
         """Plot the state variables and control inputs over time. Plots angular velocity, linear velocity, attitude quaternion, and control inputs on separate subplots.
         Args:
@@ -427,16 +498,19 @@ class Simulation():
             control_inputs (bool): Whether to plot control inputs.
             control_moments (bool): Whether to log control moments at each step. Default is False.
             file_name (str): File name to read the CSV file if reading from CSV. Don't need to include .csv extension. Same as used in save_controls_to_csv(). If None, uses locally logged data.
+            file_path (str): File path to read the CSV file if reading from CSV. If None, uses locally logged data. Overrides file_name if both provided.
         """
         states = None
         inputs = None
         moments = None
         times = None
-        if file_name is not None:
-            times, states, inputs, moments = self.read_controls_from_csv(file_name)
+        if file_name is not None or file_path is not None:
+            times, states, inputs, moments = self.read_controls_from_csv(file_name, file_path)
             if len(states) == 0:
                 raise ValueError("No dynamics data to plot. Please run the controls simulation first using run_controls_simulation() and save to CSV using save_controls_to_csv().")
             print(f"Using controls data from {file_name}.csv for plotting.")
+            burnout_time = self.controls_metadata.get("motor_burnout_time")
+            launch_clear_time = self.controls_metadata.get("launch_rail_clearance_time")
         else:
             if len(self.controls_states) == 0:
                 raise ValueError("No controls data to plot. Please run the controls simulation first using run_controls_simulation().")
@@ -445,6 +519,8 @@ class Simulation():
             inputs = np.array(self.controls_inputs)
             moments = np.array(self.controls_input_moments)
             times = np.array(self.controls_times)
+            burnout_time = getattr(self.controls, "t_motor_burnout", None)
+            launch_clear_time = getattr(self.controls, "t_launch_rail_clearance", None)
             
         fig, axs = plt.subplots(5, 1, figsize=(10, 20))
         if ang_vel:
@@ -473,7 +549,7 @@ class Simulation():
                 axs[2].set_ylabel('Quaternion Components')
             else:
                 # Convert quaternions to Euler angles for plotting
-                euler_angles = np.array([self.controls.quat_to_euler_xyz(q) for q in states[:, 6:10]])
+                euler_angles = np.array([self.quat_to_euler_xyz(q) for q in states[:, 6:10]])
                 axs[2].plot(times, np.rad2deg(euler_angles[:, 0]), label='Pitch (deg)')
                 axs[2].plot(times, np.rad2deg(euler_angles[:, 1]), label='Yaw (deg)')
                 axs[2].plot(times, np.rad2deg(euler_angles[:, 2]), label='Roll (deg)')
@@ -496,14 +572,17 @@ class Simulation():
             axs[4].set_ylabel('Control Inputs (degrees) / Moments (Nm)')
             axs[4].legend()
 
-        # Plot vertical line at motor burnout time
-        if self.controls.t_motor_burnout is not None:
-            for ax in axs:
-                ax.axvline(x=self.controls.t_motor_burnout, color='r', linestyle='--', label='Motor Burnout')
-                ax.axvline(x=self.controls.t_launch_rail_clearance, color = 'b', linestyle='--', label="Launch Rail Clearance")
+        # Plot vertical lines using metadata when available
+        for ax in axs:
+            if launch_clear_time is not None:
+                ax.axvline(x=float(launch_clear_time), color='b', linestyle='--', label="Launch Rail Clearance")
+            if burnout_time is not None:
+                ax.axvline(x=float(burnout_time), color='r', linestyle='--', label='Motor Burnout')
+            if launch_clear_time is not None or burnout_time is not None:
                 ax.legend()
-                ax.grid(True, which='both', linestyle='--', linewidth=0.5)
-        
+            ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+
+        fig.tight_layout()
         return fig, axs
         
     
@@ -516,7 +595,9 @@ class Simulation():
         control_inputs: bool = True,
         control_moments : bool = True,
         controls_file_name : str = None,
-        dyanmics_file_name : str = None
+        controls_file_path : str = None,
+        dynamics_file_name : str = None,
+        dynamics_file_path : str = None
     ):
         fig, axs = self.plot_controls(
             ang_vel=ang_vel,
@@ -525,12 +606,14 @@ class Simulation():
             quaternion=quaternion,
             control_inputs=control_inputs,
             control_moments=control_moments,
-            file_name=controls_file_name)
-        print(f"Using dynamics data from {dyanmics_file_name}.csv for plotting.")
+            file_name=controls_file_name,
+            file_path=controls_file_path
+        )
+        print(f"Using dynamics data from {dynamics_file_name}.csv for plotting.")
         states = None
         times = None
-        if dyanmics_file_name is not None:
-            times, states = self.read_dynamics_from_csv(dyanmics_file_name)
+        if dynamics_file_name is not None or dynamics_file_path is not None:
+            times, states = self.read_dynamics_from_csv(dynamics_file_name, dynamics_file_path)
             if len(states) == 0:
                 raise ValueError("No dynamics data to plot. Please run the dynamics simulation first using run_dynamics_simulation() and save to CSV using save_dynamics_to_csv().")
         else:
@@ -538,7 +621,8 @@ class Simulation():
                 raise ValueError("No dynamics data to plot. Please run the dynamics simulation first using run_dynamics_simulation().")
             states = np.array(self.dynamics_states)
             times = np.array(self.dynamics_times)
-            
+        
+        # Some states are commented out to reduce clutter in the plots
         if ang_vel:
             # axs[0].plot(times, states[:, 0], label='dyn ω1')
             # axs[0].plot(times, states[:, 1], label='dyn ω2')
@@ -569,13 +653,14 @@ class Simulation():
 
         
     
-    def compare_dyn_or(self, dyn_file_name: str, or_file_path: str):
+    def compare_dyn_or(self, or_file_path : str, dyn_file_name: str = None, dyn_file_path: str = None):
         """Compare simulation results with OpenRocket data.
         Ensure that the OpenRocket data file contains the required columns:
         Time (s), Vertical Speed (m/s), Total velocity (m/s), Roll rate (°/s).
 
         Args:
             dyn_file_name (str): File name to read the dynamics CSV file. Don't need to include .csv extension.
+            dyn_file_path (str): Path to the dynamics CSV file. If provided, overrides dyn_file_name.
             or_file_path (str): Path to the OpenRocket CSV data file.
         """
         # Load OpenRocket data
@@ -592,7 +677,7 @@ class Simulation():
         or_w3 = or_w3[apogee]
         
         # Extract simulation altitude data
-        sim_times, sim_states = self.read_dynamics_from_csv(dyn_file_name)
+        sim_times, sim_states = self.read_dynamics_from_csv(dyn_file_name, dyn_file_path)
         sim_v3 = sim_states[:, 5]
         sim_vmag = np.linalg.norm(sim_states[:, 3:6], axis=1)
         sim_w3 = sim_states[:, 2]
@@ -620,13 +705,17 @@ class Simulation():
         axs[2].set_ylabel('Roll Rate (rad/s)')
         axs[2].legend()
         
-        # Plot vertical line at motor burnout time
-        if self.dynamics.t_motor_burnout is not None:
-            for ax in axs:
-                ax.axvline(x=self.dynamics.t_motor_burnout, color='r', linestyle='--', label='Motor Burnout')
-                ax.axvline(x=self.dynamics.t_launch_rail_clearance, color = 'b', linestyle='--', label="Launch Rail Clearance")
+        # Plot vertical lines using metadata when available
+        burnout_time = self.dynamics_metadata.get("motor_burnout_time") if dyn_file_name is not None or dyn_file_path is not None else getattr(self.dynamics, "t_motor_burnout", None)
+        launch_clear_time = self.dynamics_metadata.get("launch_rail_clearance_time") if dyn_file_name is not None or dyn_file_path is not None else getattr(self.dynamics, "t_launch_rail_clearance", None)
+        for ax in axs:
+            if launch_clear_time is not None:
+                ax.axvline(x=float(launch_clear_time), color='b', linestyle='--', label="Launch Rail Clearance")
+            if burnout_time is not None:
+                ax.axvline(x=float(burnout_time), color='r', linestyle='--', label='Motor Burnout')
+            if launch_clear_time is not None or burnout_time is not None:
                 ax.legend()
-                ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+            ax.grid(True, which='both', linestyle='--', linewidth=0.5)
 
         plt.tight_layout()
         plt.show()
@@ -634,6 +723,48 @@ class Simulation():
         print("If results don't match closely, ensure that the rocket configuration and simulation parameters are consistent between OpenRocket and this simulation.")
         
         return fig, axs
+
+
+    def plot_aoa(self, source: str = "dynamics", file_name: str = None):
+        """Plot angle of attack vs time from logged data or a CSV.
+
+        Args:
+            source (str): 'dynamics' or 'controls' to select which log to plot.
+            file_name (str): Optional CSV name (no extension) to read AoA from; expects an 'AoA' column and 'time'.
+                             If None, uses in-memory logs.
+        """
+        source = source.lower()
+        if source not in {"dynamics", "controls"}:
+            raise ValueError("source must be 'dynamics' or 'controls'")
+
+        if file_name:
+            base_path = self.dynamics_path if source == "dynamics" else self.controls_path
+            df = pd.read_csv(base_path / f"{file_name}.csv", comment="#")
+            if "AoA" not in df.columns:
+                raise ValueError(f"'AoA' column not found in {file_name}.csv")
+            times = df["time"].to_numpy() if "time" in df.columns else np.arange(len(df["AoA"]))
+            aoa = df["AoA"].to_numpy()
+        else:
+            if source == "dynamics":
+                if not self.dynamics_times or not self.dynamics_aoa:
+                    raise ValueError("No dynamics AoA data logged. Run the dynamics simulation first.")
+                times = np.array(self.dynamics_times)
+                aoa = np.array(self.dynamics_aoa)
+            else:
+                if not self.controls_times or not self.controls_aoa:
+                    raise ValueError("No controls AoA data logged. Run the controls simulation first.")
+                times = np.array(self.controls_times)
+                aoa = np.array(self.controls_aoa)
+
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.plot(times, aoa, label=f"AoA ({source})")
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("AoA (rad)")
+        ax.set_title("Angle of Attack vs Time")
+        ax.legend()
+        ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+        fig.tight_layout()
+        return fig, ax
 
 
     def reset_logs(self):
@@ -680,3 +811,98 @@ class Simulation():
             list: List of string representations of the variables.
         """
         return [str(var) for var in var_list]
+
+
+    @staticmethod
+    def _read_metadata_comments(file_path: Path) -> dict:
+        """Read metadata lines (prefixed with '#') from a CSV file."""
+        metadata = {}
+        with open(file_path, 'r') as f:
+            for line in f:
+                if not line.startswith('#'):
+                    continue
+                stripped = line.lstrip('#').strip()
+                if not stripped:
+                    continue
+                parts = stripped.split(',', 1)
+                if len(parts) != 2:
+                    continue
+                key, value = parts[0].strip(), parts[1].strip()
+                try:
+                    metadata[key] = float(value)
+                except ValueError:
+                    metadata[key] = value
+        return metadata
+
+
+    @staticmethod
+    def _append_metadata_comment(file_path: Path, key: str, value):
+        """Append a metadata comment line (# key,value) to a CSV if value is provided."""
+        if value is None:
+            return
+        with open(file_path, 'a') as f:
+            f.write(f"# {key},{value}\n")
+    
+    
+    def quat_to_euler_xyz(self, q: np.ndarray, degrees=False, eps=1e-9) -> tuple:
+        """
+        Convert quaternion [w, x, y, z] to Euler angles (theta, phi, psi)
+        using the intrinsic XYZ convention:
+            theta: rotation about x (pitch)
+            phi:   rotation about y (yaw)
+            psi:   rotation about z (roll)
+        Such that: R = Rz(psi) @ Ry(phi) @ Rx(theta)
+
+        Args:
+            q (array-like): Quaternion [w, x, y, z].
+            degrees (bool): If True, return angles in degrees. (default: radians)
+            eps (float):    Small epsilon to handle numerical edge cases.
+
+        Returns:
+            (theta, phi, psi): tuple of floats
+        """
+        # normalize to be safe
+        n = np.linalg.norm(q)
+        if n < eps:
+            raise ValueError("Zero-norm quaternion")
+        w = q[0] / n
+        x = q[1] / n
+        y = q[2] / n
+        z = q[3] / n
+
+        # Rotation matrix from quaternion (world<-body)
+        # R[i,j] = row i, column j
+        xx, yy, zz = x*x, y*y, z*z
+        wx, wy, wz = w*x, w*y, w*z
+        xy, xz, yz = x*y, x*z, y*z
+
+        R = np.array([
+            [1 - 2*(yy + zz),   2*(xy - wz),       2*(xz + wy)],
+            [2*(xy + wz),       1 - 2*(xx + zz),   2*(yz - wx)],
+            [2*(xz - wy),       2*(yz + wx),       1 - 2*(xx + yy)]
+        ])
+
+        # Extract for intrinsic XYZ (q = qz(psi) ⊗ qy(phi) ⊗ qx(theta))
+        # From R = Rz(psi) Ry(phi) Rx(theta):
+        #   phi   = asin(-R[2,0])
+        #   theta = atan2(R[2,1], R[2,2])
+        #   psi   = atan2(R[1,0], R[0,0])
+        #
+        # Handle numerical drift by clamping asin argument.
+        s = -R[2, 0]
+        s = np.clip(s, -1.0, 1.0)
+        phi   = np.arcsin(s)
+        theta = np.arctan2(R[2, 1], R[2, 2])
+
+        # If cos(phi) ~ 0 (gimbal lock), fall back to a stable computation for psi
+        if abs(np.cos(phi)) < eps:
+            # At gimbal lock, theta and psi are coupled; choose a consistent psi:
+            # Use elements that remain well-defined:
+            # when cos(phi) ~ 0, use psi from atan2(-R[0,1], R[1,1])
+            psi = np.arctan2(-R[0, 1], R[1, 1])
+        else:
+            psi = np.arctan2(R[1, 0], R[0, 0])
+
+        if degrees:
+            return np.degrees(theta), np.degrees(phi), np.degrees(psi)
+        return theta, phi, psi

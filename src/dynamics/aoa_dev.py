@@ -78,7 +78,7 @@ class Dynamics:
         """Set the symbolic variables for the dynamics equations.
         """
         w1, w2, w3, v1, v2 = symbols('w_1 w_2 w_3 v_1 v_2', real = True) # Angular and linear velocities
-        v3 = symbols('v_3', real = True, positive = True) # Longitudinal velocity, assumed positive during flight
+        v3 = symbols('v_3', real = True) # Longitudinal velocity, assumed positive during flight
         qw, qx, qy, qz = symbols('q_w q_x q_y q_z', real = True) # Quaternion components
         I1, I2, I3 = symbols('I_1 I_2 I_3', real = True, positive = True) # Moments of inertia
         T1, T2, T3 = symbols('T_1 T_2 T_3', real = True, positive = True) # Thrusts
@@ -324,13 +324,10 @@ class Dynamics:
         x_CG = self.x_CG_0 - (self.x_CG_0 - self.x_CG_f) / self.t_motor_burnout * t if t <= self.t_motor_burnout else self.x_CG_f
         return x_CG
 
-    ## BUGGED ##
+
     def get_AoA(self, v_wind: list, state: list):
         w1, w2, w3, v1, v2, v3, qw, qx, qy, qz = state
         v_wind1, v_wind2 = v_wind
-        t_sym = self.t_sym
-        H = Heaviside(t_sym - Float(self.t_launch_rail_clearance), 0)  # 0 if t < t_launch_rail_clearance, 1 if t >= t_launch_rail_clearance
-
         v_wind3 = Float(0)
 
         # Velocity of rocket relative to air (points where rocket is moving through air)
@@ -350,11 +347,12 @@ class Dynamics:
         V2   = va1**2 + va2**2 + va3**2
         Vperp2 = Max(Float(0), V2 - Vpar**2)
         Vperp  = sqrt(Vperp2)
-
-        # AoA magnitude (0 when aligned, safe at small speeds)
-        AoA = H * atan2(Vperp, Vpar + eps)
-        return AoA
         
+        H = Heaviside(self.t_sym - Float(self.t_launch_rail_clearance), 0)
+        AoA = H * atan2(Vperp, Vpar + eps)
+        # AoA magnitude (0 when aligned, safe at small speeds)
+        return AoA
+
 
     def quat_to_euler_xyz(self, q: np.ndarray, degrees=False, eps=1e-9) -> tuple:
         """
@@ -456,29 +454,23 @@ class Dynamics:
         return q
 
 
-    def R_BW_from_q(self, qw, qx, qy, qz) -> Matrix:
-        """Convert a quaternion to a rotation matrix. World to body frame.
+    def R_WB_from_q(self, qw, qx, qy, qz) -> Matrix:
+        s = (qw**2 + qx**2 + qy**2 + qz**2)**-Rational(1,2)
+        qw, qx, qy, qz = qw*s, qx*s, qy*s, qz*s
 
-        Args:
-            qw (float): The scalar component of the quaternion.
-            qx (float): The x component of the quaternion.
-            qy (float): The y component of the quaternion.
-            qz (float): The z component of the quaternion.
+        xx, yy, zz = qx*qx, qy*qy, qz*qz
+        wx, wy, wz = qw*qx, qw*qy, qw*qz
+        xy, xz, yz = qx*qy, qx*qz, qy*qz
 
-        Returns:
-            Matrix: The rotation matrix from world to body frame.
-        """
-        s = (qw**2 + qx**2 + qy**2 + qz**2)**-Rational(1,2) # Normalizing factor
-        qw, qx, qy, qz = qw*s, qx*s, qy*s, qz*s # Normalized quaternion components
-
-        xx,yy,zz = qx*qx, qy*qy, qz*qz
-        wx,wy,wz = qw*qx, qw*qy, qw*qz
-        xy,xz,yz = qx*qy, qx*qz, qy*qz
         return Matrix([
-            [1-2*(yy+zz),   2*(xy+wz),   2*(xz-wy)],
-            [2*(xy-wz),     1-2*(xx+zz), 2*(yz+wx)],
-            [2*(xz+wy),     2*(yz-wx),   1-2*(xx+yy)]
+            [1-2*(yy+zz), 2*(xy - wz), 2*(xz + wy)],
+            [2*(xy + wz), 1-2*(xx+zz), 2*(yz - wx)],
+            [2*(xz - wy), 2*(yz + wx), 1-2*(xx+yy)]
         ])
+
+
+    def R_BW_from_q(self, qw, qx, qy, qz) -> Matrix:
+        return self.R_WB_from_q(qw,qx,qy,qz).T
 
     
     def set_forces(self) -> Matrix:
@@ -491,19 +483,33 @@ class Dynamics:
     
         H = Heaviside(t_sym - Float(self.t_launch_rail_clearance), 0)  # 0 if t < t_launch_rail_clearance, 1 if t >= t_launch_rail_clearance
 
-        epsAoA = Float(1e-9)  # Small term to avoid division by zero in AoA calculation
-        AoA = atan2(sqrt(v1**2 + v2**2), v3 + epsAoA) # Angle of attack
-        AoA = Piecewise(
-            (0,   Abs(AoA) <= epsAoA),                # inside deadband
-            (Min(Abs(AoA), 15 * pi / 180) * (AoA/Abs(AoA)), True)  # ±15°
-        )
-        # v_wind = (v_wind1, v_wind2)
-        # AoA = self.get_AoA(v_wind, self.state_vars)
+        # epsAoA = Float(1e-9)  # Small term to avoid division by zero in AoA calculation
+        # AoA = atan2(sqrt(v1**2 + v2**2), v3 + epsAoA) # Angle of attack
+        # AoA = Piecewise(
+        #     (0,   Abs(AoA) <= epsAoA),                # inside deadband
+        #     (Min(Abs(AoA), 15 * pi / 180) * (AoA/Abs(AoA)), True)  # ±15°
+        # )
+        v_wind = (v_wind1, v_wind2)
+        
+        AoA = self.get_AoA(v_wind, self.state_vars)
 
-        eps = Float(1e-9)  # Small term to avoid division by zero
-        v = Matrix([v1, v2, v3]) # Velocity vector
-        v_mag = sqrt(v1**2 + v2**2 + v3**2 + eps**2) # Magnitude of velocity with small term to avoid division by zero
-        vhat = v / v_mag  # Unit vector in direction of velocity
+        # eps = Float(1e-9)  # Small term to avoid division by zero
+        # v = Matrix([v1, v2, v3]) # Velocity vector
+        # v_mag = sqrt(v1**2 + v2**2 + v3**2 + eps**2) # Magnitude of velocity with small term to avoid division by zero
+        # vhat = v / v_mag  # Unit vector in direction of velocity
+        
+        # TESTING
+        v_wind3 = Float(0)
+        v_air_world = Matrix([v1 - v_wind1, v2 - v_wind2, v3 - v_wind3])
+
+        R_world_to_body = self.R_BW_from_q(qw, qx, qy, qz)
+        v_air_body : Matrix = R_world_to_body * v_air_world
+
+        eps = Float("1e-6")
+        v_mag = sqrt(v_air_body.dot(v_air_body) + eps**2)
+        
+        vhat = v_air_body / v_mag
+        # TESTING
 
         ## Rocket reference area ##
         A = pi * (d/2)**2 # m^2
@@ -517,13 +523,18 @@ class Dynamics:
         Fg : Matrix = R_world_to_body * Fg_world  # Transform gravitational force to body frame
 
         ## Drag Force ##
-        D = C_d * 1/2 * rho * v_mag**2 * A # Drag force using constant drag coefficient
+        D = H * C_d * 1/2 * rho * v_mag**2 * A # Drag force using constant drag coefficient
         Fd : Matrix = -D * vhat # Drag force vector
 
         ## Lift Force ##
-        eps_beta = Float(1e-9)
-        nan_guard = sqrt(v1**2 + v2**2 + eps_beta**2)
-        beta = 2 * atan2(v2, nan_guard + v1) # Equivalent to atan2(v2, v1) but avoids NaN at (0,0)
+        # eps_beta = Float(1e-9)
+        # nan_guard = sqrt(v1**2 + v2**2 + eps_beta**2)
+        # beta = 2 * atan2(v2, nan_guard + v1) # Equivalent to atan2(v2, v1) but avoids NaN at (0,0)
+        
+        # TESTING
+        beta = atan2(v_air_body[1], v_air_body[0] + eps)
+        # TESTING
+        
         L = H * 1/2 * rho * v_mag**2 * (2 * pi * AoA) * A # Lift force approximation
         nL = Matrix([
             -cos(AoA) * cos(beta),
@@ -568,24 +579,46 @@ class Dynamics:
         # v_wind = (v_wind1, v_wind2)
         # AoA = self.get_AoA(v_wind, self.state_vars)
 
-        eps = Float(1e-9)  # Small term to avoid division by zero
-        v_mag = sqrt(v1**2 + v2**2 + v3**2 + eps**2) # Magnitude of velocity with small term to avoid division by zero
+        # eps = Float(1e-9)  # Small term to avoid division by zero
+        # v_mag = sqrt(v1**2 + v2**2 + v3**2 + eps**2) # Magnitude of velocity with small term to avoid division by zero
 
+        # TESTING
+        v_wind3 = Float(0)
+        v_air_world = Matrix([v1 - v_wind1, v2 - v_wind2, v3 - v_wind3])
+
+        R_world_to_body = self.R_BW_from_q(qw, qx, qy, qz)
+        v_air_body : Matrix = R_world_to_body * v_air_world
+
+        eps = Float("1e-6")
+        v_mag = sqrt(v_air_body.dot(v_air_body) + eps**2)
+        
+        beta = atan2(v_air_body[1], v_air_body[0] + eps)
+        # TESTING
+        
         ## Rocket reference area ##
         A = pi * (d/2)**2 # m^2
         
-        ## Stability Margin ##
-        AoA_deg = AoA * 180 / pi # Convert AoA to degrees for polynomial fit
+        # Center of pressure
+        AoA_deg = AoA * 180 / pi
+
+        # Smooth bound to +/- 25 deg (or whatever your data range is)
+        AoA_deg_max = Float(25.0)
+        AoA_deg_bounded = AoA_deg_max * tanh(AoA_deg / AoA_deg_max)
+
+        CP = self.CP_func(AoA_deg_bounded)
+
+        C_raw = v_mag**2 * A * Cnalpha_rocket * AoA * (CP - CG) * rho / 2
+
 
         ## Corrective moment coefficient ##
         # CG is where rotation is about and CP is where force is applied
             # SM = (CP - CG) / d
         # Equations from ApogeeRockets
-        C_raw = v_mag**2 * A * Cnalpha_rocket * AoA * (self.CP_func(AoA_deg) - CG) * rho / 2
+        # C_raw = v_mag**2 * A * Cnalpha_rocket * AoA * (self.CP_func(AoA_deg) - CG) * rho / 2
         
-        eps_beta = Float(1e-9)
-        nan_guard = sqrt(v1**2 + v2**2 + eps_beta**2)
-        beta = 2 * atan2(v2, nan_guard + v1) # Equivalent to atan2(v2, v1) but avoids NaN at (0,0)
+        # eps_beta = Float(1e-9)
+        # nan_guard = sqrt(v1**2 + v2**2 + eps_beta**2)
+        # beta = 2 * atan2(v2, nan_guard + v1) # Equivalent to atan2(v2, v1) but avoids NaN at (0,0)
         
         M_f_pitch = C_raw * sin(beta) # Pitch forcing moment
         M_f_yaw = -C_raw * cos(beta) # Yaw forcing moment
@@ -731,7 +764,7 @@ class Dynamics:
         """
         self.checkParamsSet()
         if self.f is None or self.state_vars is None:
-            self.setup_eom()
+            self.define_eom()
 
         w1, w2, w3, v1, v2, v3, qw, qx, qy, qz = self.state_vars
         I1, I2, I3, T1, T2, T3, mass, rho, d, g, CG, delta, C_d, Cnalpha_fin, Cnalpha_rocket, Cr, Ct, s, N, v_wind1, v_wind2 = self.params
@@ -887,6 +920,11 @@ class Dynamics:
 
         param_vals = self._gather_param_values(t)
         result = self._f_numeric(*(state_vals + param_vals + [float(t)]))
+        y = np.array(result, dtype=float).reshape(-1)
+        if not np.all(np.isfinite(y)):
+            raise FloatingPointError(f"Non-finite f at t={t}, x={x}, f={y}")
+        # return y
+
         return np.array(result, dtype=float).reshape(-1)
         
     
