@@ -94,7 +94,7 @@ class Dynamics:
         self.state_vars = [w1, w2, w3, v1, v2, v3, qw, qx, qy, qz]
         self.params = [I1, I2, I3, T1, T2, T3, mass, rho, d, g, CG, delta, C_d, Cnalpha_fin, Cnalpha_rocket, Cr, Ct, s, N, v_wind1, v_wind2]
         # self.params = [I1, I2, I3, T1, T2, T3, mass, rho, d, g, CG, delta, C_d, Cnalpha_fin, Cnalpha_rocket, Cr, Ct, s, N]
-        self.t_sym = t_sym
+        self.t_sym = t_sym # Time when rocket leaves the launch rail
 
 
     ## Helper function to print thrust curve ##
