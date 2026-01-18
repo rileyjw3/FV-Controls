@@ -139,6 +139,7 @@ class SilSim:
 
         # To modify simulation boolean flags (e.g. disable_sensors and disable_controls), call class functions enable/disable sensors/controls()
         # e.g., self.enable_sensors(), self.disable_controls()
+        self.controller.dt = 1.0 / self.sampling_rate
         xhat, u = self.simulation.controls_step(time, self.xhats[-1], self.inputs[-1], self.rocketpy_state_to_xhat(state))
         fins : Fins = interactive_objects[0]  # Assuming fins are the first/only interactive object
         fins.aileronAngles = u
